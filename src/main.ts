@@ -24,6 +24,12 @@ interface ShellState extends KernelStatusPayload {
   autostart: boolean;
 }
 
+interface UpdatePayload {
+  current: string;
+  latest: string;
+  has_update: boolean;
+}
+
 type ViewName = "loading" | "error" | "guide";
 
 const INSTALL_COMMAND = "npm i -g @deepseek-ai/dsh";
@@ -41,6 +47,9 @@ const errorMessageEl = document.querySelector<HTMLElement>("#error-message");
 const btnRestart = document.querySelector<HTMLButtonElement>("#btn-restart");
 const btnRedetect = document.querySelector<HTMLButtonElement>("#btn-redetect");
 const btnCopy = document.querySelector<HTMLButtonElement>("#btn-copy-command");
+const updateBanner = document.querySelector<HTMLElement>("#update-banner");
+const updateBannerText = document.querySelector<HTMLElement>("#update-banner-text");
+const btnUpdate = document.querySelector<HTMLButtonElement>("#btn-update");
 
 function showView(name: ViewName): void {
   for (const [viewName, el] of views) {
@@ -102,6 +111,18 @@ async function copyInstallCommand(): Promise<void> {
   }
 }
 
+function renderUpdate(payload: UpdatePayload): void {
+  if (!updateBanner || !updateBannerText) {
+    return;
+  }
+  if (payload.has_update) {
+    updateBannerText.textContent = `发现新版本 dsh v${payload.latest}（当前 v${payload.current}）`;
+    updateBanner.hidden = false;
+  } else {
+    updateBanner.hidden = true;
+  }
+}
+
 async function init(): Promise<void> {
   btnRestart?.addEventListener("click", () => {
     void invoke("restart_kernel");
@@ -112,10 +133,20 @@ async function init(): Promise<void> {
   btnCopy?.addEventListener("click", () => {
     void copyInstallCommand();
   });
+  btnUpdate?.addEventListener("click", () => {
+    if (btnUpdate) {
+      btnUpdate.disabled = true;
+      btnUpdate.textContent = "更新中…";
+    }
+    void invoke("install_update");
+  });
 
   try {
     await listen<KernelStatusPayload>("kernel-status", (event) => {
       render(event.payload);
+    });
+    await listen<UpdatePayload>("dsh-update", (event) => {
+      renderUpdate(event.payload);
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
