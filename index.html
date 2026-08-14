@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="color-scheme" content="dark" />
+    <meta name="color-scheme" content="light" />
     <title>WhaleNest</title>
   </head>
   <body>
@@ -19,11 +19,12 @@
         <!-- 加载中 -->
         <section id="view-loading" class="view" data-view="loading">
           <div class="brand" aria-hidden="true">
-            <svg class="brand-mark" viewBox="0 0 120 72" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <path class="wave wave--back" d="M10 22 C 26 10, 44 10, 58 22" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
-              <path class="wave wave--mid" d="M10 38 C 30 22, 56 22, 72 36" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
-              <path class="wave wave--front" d="M10 54 C 34 36, 66 36, 88 50" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
-            </svg>
+            <div class="splash">
+              <img class="splash-img" src="/loading/1.png" alt="" draggable="false" />
+              <img class="splash-img" src="/loading/2.png" alt="" draggable="false" />
+              <img class="splash-img" src="/loading/3.png" alt="" draggable="false" />
+              <img class="splash-img" src="/loading/4.png" alt="" draggable="false" />
+            </div>
           </div>
 
           <div class="stage">
@@ -69,8 +70,11 @@
             <code>npm i -g @deepseek-ai/dsh</code>
             <button id="btn-copy-command" class="btn ghost" type="button">复制</button>
           </div>
-          <p class="view-sub guide-sub">需要 Node.js 22 或更高版本。安装完成后，点击「重新检测」。</p>
-          <button id="btn-redetect" class="btn primary" type="button">重新检测</button>
+          <p class="view-sub guide-sub">需要 Node.js 22 或更高版本。可一键自动安装，或手动执行上方命令后点击「重新检测」。</p>
+          <div class="guide-actions">
+            <button id="btn-install-dsh" class="btn primary" type="button">一键安装 dsh</button>
+            <button id="btn-redetect" class="btn ghost" type="button">重新检测</button>
+          </div>
         </section>
 
       </main>
