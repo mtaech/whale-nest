@@ -1,0 +1,4 @@
+# pnpm 11 reads settings from pnpm-workspace.yaml (allowBuilds map syntax).
+# Approve the esbuild postinstall so vite works.
+allowBuilds:
+  esbuild: true

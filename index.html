@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>WhaleNest</title>
+  </head>
+  <body>
+    <div id="app">
+      <main class="shell">
+
+        <!-- 加载中 -->
+        <section id="view-loading" class="view" data-view="loading">
+          <div class="spinner" role="status" aria-label="正在启动"></div>
+          <h1 class="view-title">正在启动 DeepSeek Harness…</h1>
+          <p class="view-sub">首次启动可能需要一点时间，请稍候</p>
+        </section>
+
+        <!-- 错误 -->
+        <section id="view-error" class="view" data-view="error" hidden>
+          <div class="view-icon error">⚠</div>
+          <h1 class="view-title">内核启动失败</h1>
+          <p id="error-message" class="view-text error-message"></p>
+          <button id="btn-restart" class="btn primary" type="button">重启内核</button>
+        </section>
+
+        <!-- 引导（未检测到 dsh） -->
+        <section id="view-guide" class="view" data-view="guide" hidden>
+          <div class="view-icon guide">🛠</div>
+          <h1 class="view-title">未检测到 dsh 内核</h1>
+          <p class="view-text">
+            WhaleNest 需要在后台运行 DeepSeek Harness（dsh）。
+            当前未检测到 dsh，请先安装它：
+          </p>
+          <div class="code-block">
+            <code>npm i -g @deepseek-ai/dsh</code>
+            <button id="btn-copy-command" class="btn ghost" type="button">复制</button>
+          </div>
+          <p class="view-sub">需要 Node.js 22 或更高版本。安装完成后，点击「重新检测」。</p>
+          <button id="btn-redetect" class="btn primary" type="button">重新检测</button>
+        </section>
+
+      </main>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

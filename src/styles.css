@@ -1,0 +1,175 @@
+:root {
+  color-scheme: dark;
+  --bg: #0f1115;
+  --fg: #e6e8eb;
+  --fg-muted: #9aa3af;
+  --accent: #4f8cff;
+  --accent-hover: #5f96ff;
+  --danger: #ff5c5c;
+  --border: #262b33;
+  --code-bg: #161a21;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  display: grid;
+  place-items: center;
+  background: var(--bg);
+  color: var(--fg);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+.shell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+  max-width: 480px;
+  padding: 48px 32px;
+  text-align: center;
+}
+
+.view {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+}
+
+/* ── 加载中 ─────────────────────────────── */
+
+.spinner {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 3px solid rgba(255, 255, 255, 0.12);
+  border-top-color: var(--accent);
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ── 通用 ─────────────────────────────── */
+
+.view-title {
+  font-size: 1.05rem;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.view-sub {
+  font-size: 0.85rem;
+  color: var(--fg-muted);
+  line-height: 1.7;
+}
+
+.view-text {
+  font-size: 0.9rem;
+  color: var(--fg-muted);
+  line-height: 1.8;
+}
+
+.view-icon {
+  font-size: 2rem;
+  line-height: 1;
+}
+
+.view-icon.error {
+  color: var(--danger);
+}
+
+/* ── 错误 ─────────────────────────────── */
+
+.error-message {
+  font-size: 0.85rem;
+  color: var(--danger);
+  background: rgba(255, 92, 92, 0.08);
+  border: 1px solid rgba(255, 92, 92, 0.25);
+  border-radius: 8px;
+  padding: 10px 14px;
+  width: 100%;
+  word-break: break-all;
+  white-space: pre-wrap;
+  user-select: text;
+}
+
+/* ── 引导 ─────────────────────────────── */
+
+.code-block {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 14px;
+  text-align: left;
+}
+
+.code-block code {
+  font-family: "Cascadia Code", Consolas, "SF Mono", Menlo, monospace;
+  font-size: 0.85rem;
+  color: #d7e0ea;
+  overflow-x: auto;
+  white-space: nowrap;
+  flex: 1;
+  user-select: text;
+}
+
+/* ── 按钮 ─────────────────────────────── */
+
+.btn {
+  font: inherit;
+  font-size: 0.9rem;
+  padding: 9px 22px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.btn.primary {
+  background: var(--accent);
+  color: #fff;
+}
+
+.btn.primary:hover {
+  background: var(--accent-hover);
+}
+
+.btn.ghost {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--fg-muted);
+  font-size: 0.75rem;
+  padding: 4px 10px;
+  white-space: nowrap;
+}
+
+.btn.ghost:hover {
+  border-color: #3a4350;
+  color: var(--fg);
+}
