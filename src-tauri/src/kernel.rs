@@ -105,9 +105,17 @@ pub enum KernelState {
     /// Spawned, waiting for the web server to accept connections.
     Starting,
     /// Web server is up; url is the actual reachable address.
-    Ready { url: String, #[allow(dead_code)] port: u16 },
+    Ready {
+        url: String,
+        #[allow(dead_code)]
+        port: u16,
+    },
     /// >= MAX_CRASHES abnormal exits inside CRASH_WINDOW — brake engaged.
-    Crashed { #[allow(dead_code)] restarts: u32, last_error: String },
+    Crashed {
+        #[allow(dead_code)]
+        restarts: u32,
+        last_error: String,
+    },
 }
 
 /// IPC-facing status mirror of the kernel (event payload + get_state).
@@ -137,7 +145,11 @@ impl LogWriter {
             .and_then(|f| f.metadata().ok())
             .map(|m| m.len())
             .unwrap_or(0);
-        Self { file, path: path.to_path_buf(), size }
+        Self {
+            file,
+            path: path.to_path_buf(),
+            size,
+        }
     }
 
     fn write_line(&mut self, line: &str) -> io::Result<()> {
@@ -161,7 +173,11 @@ impl LogWriter {
         let backup = self.path.with_extension("log.1");
         let _ = fs::remove_file(&backup);
         let _ = fs::rename(&self.path, &backup);
-        self.file = OpenOptions::new().create(true).append(true).open(&self.path).ok();
+        self.file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .ok();
         self.size = 0;
         Ok(())
     }
@@ -221,7 +237,10 @@ impl Kernel {
 
     /// Remaining readiness timeout while Starting (None when not applicable).
     pub fn remaining_ready_timeout(&self) -> Option<Duration> {
-        if self.ready_emitted || self.timeout_emitted || !matches!(self.state, KernelState::Starting) {
+        if self.ready_emitted
+            || self.timeout_emitted
+            || !matches!(self.state, KernelState::Starting)
+        {
             return None;
         }
         self.ready_deadline

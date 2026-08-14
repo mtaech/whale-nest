@@ -8,6 +8,7 @@ mod kernel;
 mod lifecycle;
 mod readiness;
 mod state;
+mod updater;
 
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -21,11 +22,14 @@ use tauri_plugin_dialog::DialogExt as _;
 use kernel::{Kernel, KernelConfig, KernelState, KernelStatus};
 use readiness::Readiness;
 use state::AppState;
+use updater::UpdateInfo;
 
 /// Managed shared state handed to commands, tray handlers, and background tasks.
 pub(crate) struct Managed {
     pub config: Arc<Mutex<AppState>>,
     pub kernel: Arc<Mutex<Kernel>>,
+    /// Last update-check result; `None` until the first check completes.
+    pub update: Arc<Mutex<Option<UpdateInfo>>>,
 }
 
 /// Event payload for the "kernel-status" channel.
@@ -85,7 +89,11 @@ fn navigate_home(app: &AppHandle) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
-    if window.url().map(|u| u.as_str() == home.as_str()).unwrap_or(false) {
+    if window
+        .url()
+        .map(|u| u.as_str() == home.as_str())
+        .unwrap_or(false)
+    {
         return; // already on the shell page
     }
     let _ = window.navigate(url);
@@ -129,30 +137,46 @@ pub(crate) fn start_kernel(app: &AppHandle) {
 }
 
 /// Restart the kernel (used by restart command, tray item, and dir switch).
+///
+/// Runs on the caller's thread only long enough to flip the UI into
+/// "starting" and hand the kill+spawn work to a background thread: the tray
+/// menu event callback lives on the app main thread, and `kill()` blocks on
+/// `taskkill` + `wait()` for the whole dsh process tree, which would freeze
+/// the UI (no animation, no response) for seconds.
 pub(crate) fn restart_kernel_impl(app: &AppHandle) {
     let managed = app.state::<Managed>();
-    let mut kernel = managed.kernel.lock().unwrap();
-    if !kernel.dsh_available() {
-        drop(kernel);
+    let dsh_available = managed.kernel.lock().unwrap().dsh_available();
+    if !dsh_available {
         emit_status(app, KernelStatus::Guide);
         return;
     }
-    let _ = kernel.kill();
-    match kernel.spawn() {
-        Ok(()) => {
-            drop(kernel);
-            emit_and_reset_view(app, KernelStatus::Starting);
+    // 1. Immediately tell the shell to show the loading view (and navigate
+    //    the webview back to the shell page) while the restart is in flight.
+    emit_and_reset_view(app, KernelStatus::Starting);
+
+    // 2. Kill + respawn on a worker thread so the main thread (tray event
+    //    dispatch) stays responsive; the watcher/readiness loops keep
+    //    supervising from their own threads.
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let managed = app.state::<Managed>();
+        let mut kernel = managed.kernel.lock().unwrap();
+        let _ = kernel.kill();
+        match kernel.spawn() {
+            Ok(()) => {
+                // State is already Starting; readiness probing will emit Ready.
+            }
+            Err(e) => {
+                let msg = format!("重启 dsh 内核失败: {e}");
+                kernel.state = KernelState::Crashed {
+                    restarts: 0,
+                    last_error: msg.clone(),
+                };
+                drop(kernel);
+                emit_and_reset_view(&app, KernelStatus::Error { message: msg });
+            }
         }
-        Err(e) => {
-            let msg = format!("重启 dsh 内核失败: {e}");
-            kernel.state = KernelState::Crashed {
-                restarts: 0,
-                last_error: msg.clone(),
-            };
-            drop(kernel);
-            emit_and_reset_view(app, KernelStatus::Error { message: msg });
-        }
-    }
+    });
 }
 
 /// Pop the native folder picker; on selection persist cwd and restart the kernel.
@@ -261,6 +285,92 @@ fn quit(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+// ── update checking ──────────────────────────────────────────────────────────
+
+/// Event payload for the "dsh-update" channel.
+#[derive(Clone, Serialize)]
+pub(crate) struct UpdateEventPayload {
+    pub current: String,
+    pub latest: String,
+    pub has_update: bool,
+}
+
+impl From<UpdateInfo> for UpdateEventPayload {
+    fn from(info: UpdateInfo) -> Self {
+        Self {
+            current: info.current,
+            latest: info.latest,
+            has_update: info.has_update,
+        }
+    }
+}
+
+/// Broadcast the stored update-check result (or a fresh one) to the frontend.
+pub(crate) fn emit_update(app: &AppHandle, info: &UpdateInfo) {
+    let _ = app.emit("dsh-update", UpdateEventPayload::from(info.clone()));
+}
+
+/// Run one update check off the main thread and store + broadcast the result.
+/// Callers may pass the last known result to avoid re-checking; `None` forces
+/// a fresh registry query.
+pub(crate) fn check_update_async(app: AppHandle) {
+    std::thread::spawn(move || {
+        let result = updater::check_for_update();
+        let app2 = app.clone();
+        let managed = app.state::<Managed>();
+        match result {
+            Some(info) => {
+                *managed.update.lock().unwrap() = Some(info.clone());
+                emit_update(&app2, &info);
+            }
+            None => {
+                // Offline / dsh missing: stay silent — never nag.
+                *managed.update.lock().unwrap() = None;
+            }
+        }
+        // Refresh the tray item regardless of outcome.
+        lifecycle::refresh_update_item(&app2);
+    });
+}
+
+/// Run `npm i -g @deepseek-ai/dsh` in the background; on success store the new
+/// version (read from `dsh --version` again) and broadcast.
+pub(crate) fn install_update_async(app: AppHandle) {
+    std::thread::spawn(move || {
+        let _ = install_update_inner();
+        let app2 = app.clone();
+        // Re-check so the UI reflects the new state (update or no-op).
+        check_update_async(app2);
+    });
+}
+
+fn install_update_inner() -> Result<(), String> {
+    use std::process::Command;
+    use std::process::Stdio;
+    let status = Command::new("npm")
+        .args(["install", "-g", "@deepseek-ai/dsh"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| format!("执行 npm 安装失败: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("npm 安装失败，退出码 {:?}", status.code()))
+    }
+}
+
+#[tauri::command]
+fn check_update(app: AppHandle) {
+    check_update_async(app);
+}
+
+#[tauri::command]
+fn install_update(app: AppHandle) -> Result<(), String> {
+    install_update_async(app);
+    Ok(())
+}
+
 // ── background supervision ──────────────────────────────────────────────────
 
 /// Watch the child process; on spontaneous exit do crash accounting and
@@ -288,9 +398,12 @@ fn spawn_kernel_watcher(app: AppHandle, kernel: Arc<Mutex<Kernel>>) {
                     }
                     KernelState::Crashed { last_error, .. } => {
                         drop(k);
-                        emit_and_reset_view(&app, KernelStatus::Error {
-                            message: last_error.clone(),
-                        });
+                        emit_and_reset_view(
+                            &app,
+                            KernelStatus::Error {
+                                message: last_error.clone(),
+                            },
+                        );
                     }
                     _ => {}
                 }
@@ -381,6 +494,8 @@ pub fn run() {
             get_diagnostics,
             open_log_file,
             copy_diagnostics,
+            check_update,
+            install_update,
             quit
         ])
         // Close = hide to tray; dsh keeps running in the background.
@@ -410,6 +525,7 @@ pub fn run() {
             app.manage(Managed {
                 config: config_arc.clone(),
                 kernel: kernel_arc.clone(),
+                update: Arc::new(Mutex::new(None)),
             });
 
             // 4. autostart sync (config is the source of truth)
@@ -433,6 +549,15 @@ pub fn run() {
             // 8. background supervision
             spawn_kernel_watcher(app.handle().clone(), kernel_arc.clone());
             spawn_readiness(app.handle().clone(), kernel_arc.clone());
+
+            // 9. delayed update check (off the critical startup path, silent on failure)
+            {
+                let app = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_secs(5));
+                    check_update_async(app);
+                });
+            }
 
             Ok(())
         })

@@ -6,27 +6,39 @@ use tauri::{AppHandle, CloseRequestApi, Manager, Runtime, Window};
 use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_clipboard_manager::ClipboardExt as _;
 
-use crate::{prompt_switch_dir, restart_kernel_impl, Managed};
+use crate::{
+    check_update_async, install_update_async, prompt_switch_dir, restart_kernel_impl, Managed,
+};
 
 /// Handle to the autostart checkbox, kept so the toggle can sync its state.
 static AUTOSTART_ITEM: std::sync::OnceLock<tauri::menu::CheckMenuItem<tauri::Wry>> =
     std::sync::OnceLock::new();
 
-/// Full 7-item tray menu:
-/// 打开主界面 / 切换工作目录 / 重启 dsh 内核 / 复制诊断信息 / 打开日志 / 开机自启(勾选) / 退出
+/// Handle to the "update available" tray item, kept so the update check can
+/// flip its label / enabled state without rebuilding the whole menu.
+static UPDATE_ITEM: std::sync::OnceLock<tauri::menu::MenuItem<tauri::Wry>> =
+    std::sync::OnceLock::new();
+
+/// Full tray menu:
+/// 打开主界面 / 切换工作目录 / 重启 dsh 内核 / 复制诊断信息 / 打开日志 / 检查更新 / [发现新版本 → 更新] / 开机自启(勾选) / 退出
 pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<()> {
-    let autostart = app
-        .state::<Managed>()
-        .config
-        .lock()
-        .unwrap()
-        .autostart;
+    let autostart = app.state::<Managed>().config.lock().unwrap().autostart;
 
     let open_main = MenuItem::with_id(app, "open-main", "打开主界面", true, None::<&str>)?;
     let switch_cwd = MenuItem::with_id(app, "switch-cwd", "切换工作目录", true, None::<&str>)?;
     let restart = MenuItem::with_id(app, "restart-kernel", "重启 dsh 内核", true, None::<&str>)?;
     let copy_diag = MenuItem::with_id(app, "copy-diagnostics", "复制诊断信息", true, None::<&str>)?;
     let open_log = MenuItem::with_id(app, "open-log", "打开日志", true, None::<&str>)?;
+    let check_update = MenuItem::with_id(app, "check-update", "检查更新", true, None::<&str>)?;
+    // "发现新版本 → 更新" appears once a newer version is detected.
+    let update_item = MenuItem::with_id(
+        app,
+        "install-update",
+        "发现新版本",
+        false, // disabled until an update is actually found
+        None::<&str>,
+    )?;
+    let _ = UPDATE_ITEM.set(update_item.clone());
     let autostart_item = CheckMenuItem::with_id(
         app,
         "toggle-autostart",
@@ -40,10 +52,28 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<()> {
 
     let menu = Menu::with_items(
         app,
-        &[&open_main, &switch_cwd, &restart, &copy_diag, &open_log, &autostart_item, &quit],
+        &[
+            &open_main,
+            &switch_cwd,
+            &restart,
+            &copy_diag,
+            &open_log,
+            &check_update,
+            &update_item,
+            &autostart_item,
+            &quit,
+        ],
     )?;
 
-    TrayIconBuilder::with_id("main-tray")
+    // Tray icon must be set explicitly — the builder does NOT fall back to the
+    // window icon, so omitting `.icon()` yields a blank/invisible tray icon on Windows.
+    let tray_icon = app.default_window_icon().cloned();
+
+    let mut tray = TrayIconBuilder::with_id("main-tray");
+    if let Some(icon) = tray_icon {
+        tray = tray.icon(icon);
+    }
+    tray = tray
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| {
@@ -62,9 +92,32 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<()> {
                     let _ = window.set_focus();
                 }
             }
-        })
-        .build(app)?;
+        });
+    tray.build(app)?;
     Ok(())
+}
+
+/// Update the "发现新版本" tray item from the latest check result:
+/// has_update → label "发现新版本 vX → 更新" and enabled; else reset to
+/// disabled placeholder. Called from the update-check completion path.
+pub fn refresh_update_item(app: &AppHandle) {
+    let has_update = app
+        .state::<Managed>()
+        .update
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|info| (info.has_update, info.latest.clone()))
+        .unwrap_or((false, String::new()));
+    if let Some(item) = UPDATE_ITEM.get() {
+        if has_update.0 {
+            let _ = item.set_text(format!("发现新版本 v{} → 更新", has_update.1));
+            let _ = item.set_enabled(true);
+        } else {
+            let _ = item.set_text("发现新版本");
+            let _ = item.set_enabled(false);
+        }
+    }
 }
 
 /// Tray menu event dispatch.
@@ -81,7 +134,9 @@ pub fn handle_tray_event(app: &AppHandle, id: &str) -> Result<(), String> {
         "restart-kernel" => restart_kernel_impl(app),
         "copy-diagnostics" => {
             let diag = app.state::<Managed>().kernel.lock().unwrap().diagnostics();
-            app.clipboard().write_text(diag).map_err(|e| e.to_string())?;
+            app.clipboard()
+                .write_text(diag)
+                .map_err(|e| e.to_string())?;
         }
         "open-log" => {
             let path = app
@@ -101,6 +156,8 @@ pub fn handle_tray_event(app: &AppHandle, id: &str) -> Result<(), String> {
                 let _ = check.set_checked(new_val);
             }
         }
+        "check-update" => check_update_async(app.clone()),
+        "install-update" => install_update_async(app.clone()),
         "quit" => exit_app(app),
         _ => {}
     }
