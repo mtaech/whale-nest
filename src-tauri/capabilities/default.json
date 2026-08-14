@@ -7,6 +7,9 @@
     "core:default",
     "dialog:default",
     "opener:default",
-    "clipboard-manager:default"
+    "clipboard-manager:default",
+    "notification:default",
+    "global-shortcut:allow-register",
+    "global-shortcut:allow-unregister"
   ]
 }

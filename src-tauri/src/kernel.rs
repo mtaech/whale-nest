@@ -42,6 +42,11 @@ pub struct KernelConfig {
     pub patches: Vec<PathBuf>,
     /// DSH_HOME override; None => default ~/.dsh (reuses existing profile).
     pub home: Option<PathBuf>,
+    /// When true, the preferred port is mandatory: if it is taken at spawn
+    /// time, startup fails with a clear error instead of drifting to a random
+    /// port. Default false (drift allowed).
+    #[allow(dead_code)]
+    pub lock_port: bool,
 }
 
 /// Resolved dsh launcher, platform-specific.
@@ -255,7 +260,7 @@ impl Kernel {
             .exec
             .as_ref()
             .ok_or_else(|| "未找到 dsh 可执行文件".to_string())?;
-        let port = self.resolve_port();
+        let port = self.resolve_port()?;
         self.current_port = Some(port);
         let port_str = port.to_string();
 
@@ -465,16 +470,20 @@ impl Kernel {
         }
     }
 
-    fn resolve_port(&self) -> u16 {
+    fn resolve_port(&self) -> Result<u16, String> {
         match self.config.port {
             Some(p) => {
                 if TcpListener::bind(("127.0.0.1", p)).is_ok() {
-                    p
+                    Ok(p)
+                } else if self.config.lock_port {
+                    Err(format!(
+                        "端口 {p} 已被占用（已锁定固定端口），请先释放该端口或关闭「固定端口」后重试"
+                    ))
                 } else {
-                    Self::pick_free_port()
+                    Ok(Self::pick_free_port())
                 }
             }
-            None => Self::pick_free_port(),
+            None => Ok(Self::pick_free_port()),
         }
     }
 

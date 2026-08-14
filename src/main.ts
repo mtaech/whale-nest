@@ -47,6 +47,7 @@ const errorMessageEl = document.querySelector<HTMLElement>("#error-message");
 const btnRestart = document.querySelector<HTMLButtonElement>("#btn-restart");
 const btnRedetect = document.querySelector<HTMLButtonElement>("#btn-redetect");
 const btnCopy = document.querySelector<HTMLButtonElement>("#btn-copy-command");
+const btnInstallDsh = document.querySelector<HTMLButtonElement>("#btn-install-dsh");
 const updateBanner = document.querySelector<HTMLElement>("#update-banner");
 const updateBannerText = document.querySelector<HTMLElement>("#update-banner-text");
 const btnUpdate = document.querySelector<HTMLButtonElement>("#btn-update");
@@ -133,6 +134,14 @@ async function init(): Promise<void> {
   btnCopy?.addEventListener("click", () => {
     void copyInstallCommand();
   });
+  btnInstallDsh?.addEventListener("click", () => {
+    if (!btnInstallDsh) {
+      return;
+    }
+    btnInstallDsh.disabled = true;
+    btnInstallDsh.textContent = "安装中…";
+    void invoke("install_dsh");
+  });
   btnUpdate?.addEventListener("click", () => {
     if (btnUpdate) {
       btnUpdate.disabled = true;
@@ -148,12 +157,23 @@ async function init(): Promise<void> {
     await listen<UpdatePayload>("dsh-update", (event) => {
       renderUpdate(event.payload);
     });
+    // dsh installed via the guide view: re-detect by re-invoking get_state.
+    await listen("dsh-installed", () => {
+      if (btnInstallDsh) {
+        btnInstallDsh.textContent = "已安装";
+      }
+      void refreshState();
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     renderError(`无法订阅内核状态：${message}`);
     return;
   }
 
+  await refreshState();
+}
+
+async function refreshState(): Promise<void> {
   try {
     const state = await invoke<ShellState>("get_state");
     render(state);

@@ -74,6 +74,12 @@ pub(crate) fn emit_status(app: &AppHandle, status: KernelStatus) {
     let _ = app.emit("kernel-status", status.payload());
 }
 
+/// Send a desktop notification (best-effort; silently ignored on failure).
+fn notify(app: &AppHandle, title: &str, body: &str) {
+    use tauri_plugin_notification::NotificationExt as _;
+    let _ = app.notification().builder().title(title).body(body).show();
+}
+
 /// The shell page URL (the window's initial address), recorded at setup so the
 /// webview can be navigated back home whenever the kernel stops serving.
 static HOME_URL: OnceLock<String> = OnceLock::new();
@@ -179,13 +185,32 @@ pub(crate) fn restart_kernel_impl(app: &AppHandle) {
     });
 }
 
+/// Switch the working directory: persist cwd + recent list, update the kernel
+/// config, then restart the kernel. Shared by the folder picker and the tray's
+/// recent-directory items.
+pub(crate) fn switch_cwd(app: &AppHandle, new_cwd: std::path::PathBuf) {
+    if new_cwd.as_os_str().is_empty() {
+        return;
+    }
+    let managed = app.state::<Managed>();
+    {
+        let mut cfg = managed.config.lock().unwrap();
+        cfg.cwd = new_cwd.clone();
+        cfg.push_recent_dir(new_cwd.clone());
+        let _ = cfg.save();
+    }
+    {
+        let mut k = managed.kernel.lock().unwrap();
+        k.config.cwd = new_cwd;
+    }
+    restart_kernel_impl(app);
+}
+
 /// Pop the native folder picker; on selection persist cwd and restart the kernel.
 pub(crate) fn prompt_switch_dir(app: &AppHandle) -> Result<(), String> {
     let managed = app.state::<Managed>();
     let current = managed.config.lock().unwrap().cwd.clone();
     let app2 = app.clone();
-    let config = managed.config.clone();
-    let kernel = managed.kernel.clone();
     app.dialog()
         .file()
         .set_directory(current)
@@ -196,26 +221,14 @@ pub(crate) fn prompt_switch_dir(app: &AppHandle) -> Result<(), String> {
             let Ok(new_cwd) = fp.into_path() else {
                 return;
             };
-            if new_cwd.as_os_str().is_empty() {
-                return;
-            }
-            {
-                let mut cfg = config.lock().unwrap();
-                cfg.cwd = new_cwd.clone();
-                let _ = cfg.save();
-            }
-            {
-                let mut k = kernel.lock().unwrap();
-                k.config.cwd = new_cwd;
-            }
-            restart_kernel_impl(&app2);
+            switch_cwd(&app2, new_cwd);
         });
     Ok(())
 }
 
 // ── IPC commands (contract with the shell frontend) ─────────────────────────
 
-/// get_state() -> { status, url?, message?, cwd, autostart }
+/// get_state() -> { status, url?, message?, cwd, autostart, lock_port }
 #[derive(Serialize)]
 pub(crate) struct StateResponse {
     pub status: String,
@@ -225,6 +238,7 @@ pub(crate) struct StateResponse {
     pub message: Option<String>,
     pub cwd: String,
     pub autostart: bool,
+    pub lock_port: bool,
 }
 
 #[tauri::command]
@@ -248,12 +262,31 @@ fn get_state(state: tauri::State<'_, Managed>) -> StateResponse {
         message,
         cwd: cfg.cwd.to_string_lossy().into_owned(),
         autostart: cfg.autostart,
+        lock_port: cfg.lock_port,
     }
 }
 
 #[tauri::command]
 fn set_working_dir(app: AppHandle) -> Result<(), String> {
     prompt_switch_dir(&app)
+}
+
+/// Toggle fixed-port mode: persist + apply to the kernel config, then restart
+/// the kernel so the new setting takes effect.
+#[tauri::command]
+fn set_lock_port(app: AppHandle, enabled: bool) -> Result<(), String> {
+    let managed = app.state::<Managed>();
+    {
+        let mut cfg = managed.config.lock().unwrap();
+        cfg.lock_port = enabled;
+        let _ = cfg.save();
+    }
+    {
+        let mut k = managed.kernel.lock().unwrap();
+        k.config.lock_port = enabled;
+    }
+    restart_kernel_impl(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -371,6 +404,25 @@ fn install_update(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// One-click dsh install from the guide view (dsh missing). Runs
+/// `npm i -g @deepseek-ai/dsh` in the background; on success emits
+/// "dsh-installed" so the shell re-detects and boots the kernel.
+#[tauri::command]
+fn install_dsh(app: AppHandle) -> Result<(), String> {
+    std::thread::spawn(move || {
+        let ok = install_update_inner().is_ok();
+        let app2 = app.clone();
+        if ok {
+            let _ = app2.emit("dsh-installed", ());
+            // Give the kernel a moment to pick up the new dsh on PATH, then
+            // re-detect by restarting the kernel.
+            std::thread::sleep(Duration::from_millis(800));
+            restart_kernel_impl(&app2);
+        }
+    });
+    Ok(())
+}
+
 // ── background supervision ──────────────────────────────────────────────────
 
 /// Watch the child process; on spontaneous exit do crash accounting and
@@ -393,10 +445,19 @@ fn spawn_kernel_watcher(app: AppHandle, kernel: Arc<Mutex<Kernel>>) {
                 let new_state = k.on_child_exit();
                 match &new_state {
                     KernelState::Starting => {
+                        let app2 = app.clone();
+                        let _ = std::thread::spawn(move || {
+                            notify(&app2, "dsh 内核异常退出", "正在自动重启，请稍候…");
+                        });
                         drop(k);
                         emit_and_reset_view(&app, KernelStatus::Starting);
                     }
                     KernelState::Crashed { last_error, .. } => {
+                        let app2 = app.clone();
+                        let msg = last_error.clone();
+                        let _ = std::thread::spawn(move || {
+                            notify(&app2, "dsh 内核已停止", &msg);
+                        });
                         drop(k);
                         emit_and_reset_view(
                             &app,
@@ -436,8 +497,18 @@ fn spawn_readiness(app: AppHandle, kernel: Arc<Mutex<Kernel>>) {
                         url: url.clone(),
                         port,
                     };
+                    // Only notify on restarts (crash recovery / manual restart),
+                    // not on the very first launch.
+                    let notify_ready = k.last_exit_status.is_some();
                     k.ready_emitted = true;
                     drop(k);
+                    if notify_ready {
+                        let app2 = app.clone();
+                        let url2 = url.clone();
+                        let _ = std::thread::spawn(move || {
+                            notify(&app2, "dsh 内核已就绪", &format!("访问地址：{url2}"));
+                        });
+                    }
                     emit_status(&app, KernelStatus::Ready { url });
                 }
                 Err(_) => {
@@ -482,20 +553,26 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            Some(vec![]),
+            // Pass --silent when launched via autostart so the window can be
+            // hidden (the app keeps running in the tray).
+            Some(vec!["--silent".into()]),
         ))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             get_state,
             set_working_dir,
+            set_lock_port,
             restart_kernel,
             get_diagnostics,
             open_log_file,
             copy_diagnostics,
             check_update,
             install_update,
+            install_dsh,
             quit
         ])
         // Close = hide to tray; dsh keeps running in the background.
@@ -517,6 +594,7 @@ pub fn run() {
                 cwd: app_state.cwd.clone(),
                 patches: Vec::new(),
                 home: None,
+                lock_port: app_state.lock_port,
             };
             let kernel = Kernel::new(kernel_config, config_dir.join("dsh.log"));
             let kernel_arc = Arc::new(Mutex::new(kernel));
@@ -536,21 +614,50 @@ pub fn run() {
             // 5. tray
             lifecycle::build_tray_menu(app.handle())?;
 
-            // 6. remember the shell page URL so we can navigate back on crash
+            // 5b. global hotkey (Ctrl+Alt+W summons the window). Registered at
+            //     runtime so a conflict with another app's shortcut only
+            //     disables the hotkey — never crashes startup.
+            {
+                use tauri_plugin_global_shortcut::GlobalShortcutExt as _;
+                if let Err(e) = app
+                    .global_shortcut()
+                    .on_shortcut("Ctrl+Alt+W", move |app, _shortcut, _event| {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.unminimize();
+                            let _ = window.set_focus();
+                        }
+                    })
+                {
+                    eprintln!("[whalenest] 全局快捷键 Ctrl+Alt+W 注册失败（可能已被其他程序占用）: {e}");
+                }
+            }
+
+            // 6. silent autostart: hide the window when launched via the
+            //    autostart entry (args carry --silent), keeping the kernel
+            //    and tray running.
+            let silent = std::env::args().any(|a| a == "--silent");
+            if silent {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+            }
+
+            // 7. remember the shell page URL so we can navigate back on crash
             if let Some(window) = app.get_webview_window("main") {
                 if let Ok(url) = window.url() {
                     let _ = HOME_URL.set(url.to_string());
                 }
             }
 
-            // 7. start the kernel (or emit guide when dsh is missing)
+            // 8. start the kernel (or emit guide when dsh is missing)
             start_kernel(app.handle());
 
-            // 8. background supervision
+            // 9. background supervision
             spawn_kernel_watcher(app.handle().clone(), kernel_arc.clone());
             spawn_readiness(app.handle().clone(), kernel_arc.clone());
 
-            // 9. delayed update check (off the critical startup path, silent on failure)
+            // 10. delayed update check (off the critical startup path, silent on failure)
             {
                 let app = app.handle().clone();
                 std::thread::spawn(move || {
