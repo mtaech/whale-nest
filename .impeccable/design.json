@@ -1,0 +1,111 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-14T00:00:00Z",
+  "title": "Design System: WhaleNest",
+  "extensions": {
+    "colorMeta": {
+      "abyss-ink": { "role": "neutral", "displayName": "深渊墨", "canonical": "#0b0e14", "tonalRamp": ["#0b0e14", "#10151d", "#141b26", "#1a2230", "#232c3d", "#2e394e", "#3d4a63", "#52607a"] },
+      "deep-sea-blue": { "role": "primary", "displayName": "深海蓝", "canonical": "#4f8cff", "tonalRamp": ["#0d2a66", "#14409c", "#1d54cc", "#2f6ae6", "#4f8cff", "#6fa2ff", "#8fb8ff", "#b3d0ff"] },
+      "wave-crest-white": { "role": "neutral", "displayName": "浪尖白", "canonical": "#e9edf3", "tonalRamp": ["#5d6a7c", "#7c8a9c", "#9aa6b5", "#b6c0cc", "#cdd5df", "#e9edf3", "#f2f5f8", "#fafbfc"] },
+      "sea-fog-gray": { "role": "neutral", "displayName": "雾灰", "canonical": "#9aa6b5", "tonalRamp": ["#3d4654", "#4d5868", "#5d6a7c", "#758393", "#9aa6b5", "#b0bac6", "#c6ced8", "#dde3ea"] },
+      "warning-coral": { "role": "tertiary", "displayName": "警示珊瑚红", "canonical": "#ff6b6b", "tonalRamp": ["#5c1414", "#8c2222", "#b83030", "#d94a4a", "#ff6b6b", "#ff8a8a", "#ffabab", "#ffcccc"] },
+      "trench-line": { "role": "neutral", "displayName": "海沟线", "canonical": "#1e2530", "tonalRamp": ["#0b0e14", "#141a24", "#1e2530", "#2a3342", "#39445a", "#4b5870", "#5f6e8a", "#7686a3"] },
+      "trench-code": { "role": "neutral", "displayName": "海沟底", "canonical": "#10151d", "tonalRamp": ["#0b0e14", "#10151d", "#161d28", "#1e2735", "#283344", "#344155", "#42516a", "#526480"] }
+    },
+    "typographyMeta": {
+      "title": { "displayName": "Title", "purpose": "视图主标题，唯一使用 600 字重的元素。" },
+      "body": { "displayName": "Body", "purpose": "说明文字与错误信息，最大行宽 40ch。" },
+      "label": { "displayName": "Label", "purpose": "副标题/次要说明。" },
+      "mono": { "displayName": "Mono", "purpose": "安装命令与代码，允许复制。" }
+    },
+    "motion": [
+      { "name": "view-in", "value": "0.45s cubic-bezier(0.22, 1, 0.36, 1)", "purpose": "视图进入：上浮 8px 淡入，仅一次。" },
+      { "name": "wave-drift", "value": "5.5s ease-in-out infinite", "purpose": "波浪 logo 呼吸：-2px 上下漂移 + 透明度 0.55→1，三线错峰。" },
+      { "name": "progress-slide", "value": "1.3s cubic-bezier(0.45, 0, 0.55, 1) infinite", "purpose": "不确定进度条滑块往复。" },
+      { "name": "btn-press", "value": "0.05s ease", "purpose": "按钮 :active 微缩 scale(0.98)。" }
+    ],
+    "breakpoints": []
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "行动按钮：启动、重启、重新检测。深海蓝填充，克制的圆角。",
+      "html": "<button class=\"ds-btn-primary\">重启内核</button>",
+      "css": ".ds-btn-primary { background: #4f8cff; color: #ffffff; font: 500 0.9rem/1 system-ui, -apple-system, 'Segoe UI', 'PingFang SC', sans-serif; padding: 9px 24px; border: none; border-radius: 9px; cursor: pointer; transition: background 0.15s ease, transform 0.05s ease; } .ds-btn-primary:hover { background: #6399ff; } .ds-btn-primary:active { transform: scale(0.98); } .ds-btn-primary:focus-visible { outline: 2px solid #4f8cff; outline-offset: 2px; }"
+    },
+    {
+      "name": "Ghost Button",
+      "kind": "button",
+      "refersTo": "button-ghost",
+      "description": "弱操作：代码块内的复制按钮。透明底 + 细边框。",
+      "html": "<button class=\"ds-btn-ghost\">复制</button>",
+      "css": ".ds-btn-ghost { background: transparent; color: #9aa6b5; font: 400 0.78rem/1 system-ui, -apple-system, 'Segoe UI', 'PingFang SC', sans-serif; padding: 4px 12px; border: 1px solid #1e2530; border-radius: 7px; cursor: pointer; white-space: nowrap; transition: border-color 0.15s ease, color 0.15s ease; } .ds-btn-ghost:hover { border-color: #2c3646; color: #e9edf3; } .ds-btn-ghost:focus-visible { outline: 2px solid #4f8cff; outline-offset: 2px; }"
+    },
+    {
+      "name": "Code Block",
+      "kind": "card",
+      "refersTo": "trench-code",
+      "description": "安装命令展示：凹陷海沟底 + 细边框，等宽字体可复制。",
+      "html": "<div class=\"ds-code-block\"><code>npm i -g @deepseek-ai/dsh</code></div>",
+      "css": ".ds-code-block { display: flex; align-items: center; gap: 10px; width: 100%; background: #10151d; border: 1px solid #1e2530; border-radius: 10px; padding: 12px 14px; } .ds-code-block code { font: 400 0.84rem/1.4 'Cascadia Code', Consolas, 'SF Mono', Menlo, monospace; color: #c9d6e4; white-space: nowrap; overflow-x: auto; flex: 1; user-select: text; }"
+    },
+    {
+      "name": "Status Icon (Error)",
+      "kind": "custom",
+      "refersTo": "warning-coral",
+      "description": "错误态图标：细线圆 + 竖线 + 圆点，警示珊瑚红，仅错误语境使用。",
+      "html": "<div class=\"ds-status-icon ds-status-icon-error\" aria-hidden=\"true\"><svg viewBox=\"0 0 48 48\" width=\"48\" height=\"48\" fill=\"none\"><circle cx=\"24\" cy=\"24\" r=\"20\" stroke=\"currentColor\" stroke-width=\"2.5\"/><path d=\"M24 15.5 V 27\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\"/><circle cx=\"24\" cy=\"33.5\" r=\"2\" fill=\"currentColor\"/></svg></div>",
+      "css": ".ds-status-icon { display: grid; place-items: center; width: 56px; height: 56px; } .ds-status-icon-error { color: #ff6b6b; }"
+    },
+    {
+      "name": "Progress Bar",
+      "kind": "custom",
+      "refersTo": "deep-sea-blue",
+      "description": "不确定进度条：2px 胶囊轨道 + 深海蓝滑块往复。",
+      "html": "<div class=\"ds-progress\" role=\"progressbar\" aria-label=\"正在启动\"><span class=\"ds-progress-bar\"></span></div>",
+      "css": ".ds-progress { width: 168px; height: 2px; border-radius: 999px; background: rgba(255, 255, 255, 0.08); overflow: hidden; } .ds-progress-bar { display: block; width: 38%; height: 100%; border-radius: inherit; background: #4f8cff; animation: ds-progress-slide 1.3s cubic-bezier(0.45, 0, 0.55, 1) infinite; } @keyframes ds-progress-slide { 0% { transform: translateX(-110%); } 100% { transform: translateX(375%); } }"
+    },
+    {
+      "name": "Brand Mark (Wave Logo)",
+      "kind": "custom",
+      "refersTo": "wave-crest-white",
+      "description": "加载视图品牌锚点：三条 2.5px 开放曲线波浪，错峰呼吸。",
+      "html": "<div class=\"ds-brand\" aria-hidden=\"true\"><svg class=\"ds-brand-mark\" viewBox=\"0 0 120 72\" width=\"104\" height=\"62\" fill=\"none\"><path class=\"ds-wave ds-wave-back\" d=\"M10 22 C 26 10, 44 10, 58 22\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\"/><path class=\"ds-wave ds-wave-mid\" d=\"M10 38 C 30 22, 56 22, 72 36\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\"/><path class=\"ds-wave ds-wave-front\" d=\"M10 54 C 34 36, 66 36, 88 50\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\"/></svg></div>",
+      "css": ".ds-brand { color: #e9edf3; } .ds-brand-mark { display: block; } .ds-wave { animation: ds-wave-drift 5.5s ease-in-out infinite; } .ds-wave-mid { animation-delay: -1.8s; } .ds-wave-front { animation-delay: -3.6s; } @keyframes ds-wave-drift { 0%, 100% { transform: translateY(0); opacity: 0.55; } 50% { transform: translateY(-2px); opacity: 1; } }"
+    }
+  ],
+  "narrative": {
+    "northStar": "深海灯塔",
+    "overview": "WhaleNest 的界面是深海之上的灯塔：背景是深不见底的墨色海面（#0b0e14），唯一的色彩是海面下透出的信号蓝光（#4f8cff）——克制、坚定、只出现在需要引航的地方。整个系统服务于一个工具性前提：壳页只在 dsh 内核未就绪/出错/缺失时短暂出现，它不该与 dsh 的实际内容争夺注意力，而应以静谧的精致感完成「等待」这件事本身。布局密度低、留白充分，垂直居中；视觉层级靠字重与间距而非装饰。动效只保留一个有意义的时刻（视图进入、波浪呼吸、进度滑动），全部遵循 prefers-reduced-motion。",
+    "keyCharacteristics": [
+      "深色优先，单一信号蓝点缀（accent 使用面积 ≤ 10%）",
+      "无硬阴影、无玻璃拟态、无渐变文字——深度靠环境光与层级",
+      "细线（2.5px）SVG 图标替代 emoji，几何而非写实",
+      "动效克制：一个视图一个作者时刻，其余静止",
+      "圆角温和（7-10px），按钮有轻微按压反馈"
+    ],
+    "rules": [
+      { "name": "The 灯塔光 Rule", "body": "深海蓝在任意屏幕上的使用面积不超过 10%。它的稀有性是整个系统的克制宣言——当蓝色出现，它必然意味着\"可以行动\"或\"已经就绪\"。", "section": "colors" },
+      { "name": "The 安静字体 Rule", "body": "不引入展示字体。工具的字体应该隐身——字号、字重、字距是唯一的分层工具。", "section": "typography" },
+      { "name": "The 扁平默认 Rule", "body": "表面静止时全部扁平。没有投影、没有悬浮卡片；深度只由色阶提供。", "section": "elevation" }
+    ],
+    "dos": [
+      "Do 让深海蓝保持稀有——它只出现在\"可行动/已就绪\"的语义点",
+      "Do 用间距分离区块，而不是给每个区块加边框卡片",
+      "Do 用 2.5px 圆头细线 SVG 表达图标，几何构图",
+      "Do 为键盘焦点提供深海蓝焦点环（2px + 2px offset）",
+      "Do 遵守 prefers-reduced-motion——动效关闭后界面必须完整可用",
+      "Do 保持标题字距 -0.015em、版本号字距 0.22em 的对比"
+    ],
+    "donts": [
+      "Don't 使用 emoji 或 unicode 字符充当图标——必须用一致描边的 SVG",
+      "Don't 使用渐变文字、玻璃拟态（backdrop-blur）、或零偏移装饰性光晕",
+      "Don't 引入展示字体/web font——系统字体栈是承诺",
+      "Don't 给表面加投影——深度只来自色阶",
+      "Don't 在非错误语境使用警示珊瑚红",
+      "Don't 用胶囊形大按钮或超过 16px 的圆角"
+    ]
+  }
+}
