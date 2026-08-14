@@ -1,6 +1,6 @@
 //! Tray menu, window-close-to-tray, autostart, and app exit.
 
-use tauri::menu::{CheckMenuItem, Menu, MenuItem};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, CloseRequestApi, Manager, Runtime, Window};
 use tauri_plugin_autostart::ManagerExt as _;
@@ -20,15 +20,22 @@ static UPDATE_ITEM: std::sync::OnceLock<tauri::menu::MenuItem<tauri::Wry>> =
     std::sync::OnceLock::new();
 
 /// Full tray menu:
-/// 打开主界面 / 切换工作目录 / 重启 dsh 内核 / 复制诊断信息 / 打开日志 / 检查更新 / [发现新版本 → 更新] / 开机自启(勾选) / 退出
+/// 打开主界面 / 切换工作目录 / [最近目录…] ── 重启 dsh 内核 / 在浏览器打开 ── 更多[打开开发者工具/复制诊断信息/打开日志/打开配置文件 ─ 检查更新/发现新版本] ── 开机自启(勾选) / 退出
 pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<()> {
-    let autostart = app.state::<Managed>().config.lock().unwrap().autostart;
+    let managed = app.state::<Managed>();
+    let cfg = managed.config.lock().unwrap();
+    let autostart = cfg.autostart;
+    let recent_dirs = cfg.recent_dirs.clone();
+    drop(cfg);
 
     let open_main = MenuItem::with_id(app, "open-main", "打开主界面", true, None::<&str>)?;
     let switch_cwd = MenuItem::with_id(app, "switch-cwd", "切换工作目录", true, None::<&str>)?;
     let restart = MenuItem::with_id(app, "restart-kernel", "重启 dsh 内核", true, None::<&str>)?;
+    let open_browser = MenuItem::with_id(app, "open-browser", "在浏览器打开", true, None::<&str>)?;
+    let open_devtools = MenuItem::with_id(app, "open-devtools", "打开开发者工具", true, None::<&str>)?;
     let copy_diag = MenuItem::with_id(app, "copy-diagnostics", "复制诊断信息", true, None::<&str>)?;
     let open_log = MenuItem::with_id(app, "open-log", "打开日志", true, None::<&str>)?;
+    let open_config = MenuItem::with_id(app, "open-config", "打开配置文件", true, None::<&str>)?;
     let check_update = MenuItem::with_id(app, "check-update", "检查更新", true, None::<&str>)?;
     // "发现新版本 → 更新" appears once a newer version is detected.
     let update_item = MenuItem::with_id(
@@ -50,20 +57,57 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<()> {
     let _ = AUTOSTART_ITEM.set(autostart_item.clone());
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
 
-    let menu = Menu::with_items(
-        app,
-        &[
-            &open_main,
-            &switch_cwd,
-            &restart,
-            &copy_diag,
-            &open_log,
-            &check_update,
-            &update_item,
-            &autostart_item,
-            &quit,
-        ],
-    )?;
+    // Debug / log / maintenance tools live under a "更多" submenu to keep the
+    // top level clean. Grouped: debug tools, then a separator, then update checks.
+    let devtools_sep = PredefinedMenuItem::separator(app)?;
+    let more_items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = vec![
+        &open_devtools as &dyn tauri::menu::IsMenuItem<tauri::Wry>,
+        &copy_diag as &dyn tauri::menu::IsMenuItem<tauri::Wry>,
+        &open_log as &dyn tauri::menu::IsMenuItem<tauri::Wry>,
+        &open_config as &dyn tauri::menu::IsMenuItem<tauri::Wry>,
+        &devtools_sep as &dyn tauri::menu::IsMenuItem<tauri::Wry>,
+        &check_update as &dyn tauri::menu::IsMenuItem<tauri::Wry>,
+        &update_item as &dyn tauri::menu::IsMenuItem<tauri::Wry>,
+    ];
+    let more_submenu = Submenu::with_id_and_items(app, "more", "更多", true, &more_items)?;
+    // Group separators for the top-level menu.
+    let sep_tools = PredefinedMenuItem::separator(app)?;
+    let sep_more = PredefinedMenuItem::separator(app)?;
+    let sep_prefs = PredefinedMenuItem::separator(app)?;
+
+    // Recent working directories, inserted under "切换工作目录".
+    let mut recent_items: Vec<tauri::menu::MenuItem<tauri::Wry>> = Vec::new();
+    if !recent_dirs.is_empty() {
+        let separator = MenuItem::with_id(app, "recent-sep", "-", false, None::<&str>)?;
+        recent_items.push(separator);
+        for dir in &recent_dirs {
+            let label = short_dir_label(dir);
+            // id encodes the path so the handler can switch without lookup.
+            let id = format!("recent:{}", dir.to_string_lossy());
+            let item = MenuItem::with_id(app, id, label, true, None::<&str>)?;
+            recent_items.push(item);
+        }
+    }
+
+    let mut items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = vec![
+        &open_main as &dyn tauri::menu::IsMenuItem<tauri::Wry>,
+        &switch_cwd as &dyn tauri::menu::IsMenuItem<tauri::Wry>,
+    ];
+    for item in &recent_items {
+        items.push(item as &dyn tauri::menu::IsMenuItem<tauri::Wry>);
+    }
+    items.extend(vec![
+        &sep_tools as &dyn tauri::menu::IsMenuItem<tauri::Wry>,
+        &restart as &dyn tauri::menu::IsMenuItem<tauri::Wry>,
+        &open_browser as &dyn tauri::menu::IsMenuItem<tauri::Wry>,
+        &sep_more as &dyn tauri::menu::IsMenuItem<tauri::Wry>,
+        &more_submenu as &dyn tauri::menu::IsMenuItem<tauri::Wry>,
+        &sep_prefs as &dyn tauri::menu::IsMenuItem<tauri::Wry>,
+        &autostart_item as &dyn tauri::menu::IsMenuItem<tauri::Wry>,
+        &quit as &dyn tauri::menu::IsMenuItem<tauri::Wry>,
+    ]);
+
+    let menu = Menu::with_items(app, &items)?;
 
     // Tray icon must be set explicitly — the builder does NOT fall back to the
     // window icon, so omitting `.icon()` yields a blank/invisible tray icon on Windows.
@@ -120,8 +164,38 @@ pub fn refresh_update_item(app: &AppHandle) {
     }
 }
 
+/// Shorten a directory path for a tray label: keep the last two components
+/// (parent + basename), or the whole path when short.
+fn short_dir_label(dir: &std::path::Path) -> String {
+    let s = dir.to_string_lossy();
+    if s.chars().count() <= 48 {
+        return s.into_owned();
+    }
+    let mut parts: Vec<String> = dir
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(p) => Some(p.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    if parts.is_empty() {
+        return s.into_owned();
+    }
+    // Last two components: "…/parent/basename"
+    let tail = parts.split_off(parts.len().saturating_sub(2));
+    format!("…/{}", tail.join("/"))
+}
+
 /// Tray menu event dispatch.
 pub fn handle_tray_event(app: &AppHandle, id: &str) -> Result<(), String> {
+    if let Some(path) = id.strip_prefix("recent:") {
+        // Recent-directory quick switch.
+        let dir = std::path::PathBuf::from(path);
+        if dir.is_dir() {
+            crate::switch_cwd(app, dir);
+        }
+        return Ok(());
+    }
     match id {
         "open-main" => {
             if let Some(window) = app.get_webview_window("main") {
@@ -132,6 +206,25 @@ pub fn handle_tray_event(app: &AppHandle, id: &str) -> Result<(), String> {
         }
         "switch-cwd" => prompt_switch_dir(app)?,
         "restart-kernel" => restart_kernel_impl(app),
+        "open-browser" => {
+            // Open the current dsh web URL in the system browser.
+            let url = match &app.state::<Managed>().kernel.lock().unwrap().state {
+                crate::kernel::KernelState::Ready { url, .. } => url.clone(),
+                _ => String::new(),
+            };
+            if url.is_empty() {
+                return Err("dsh 内核尚未就绪，暂无可打开的地址".into());
+            }
+            tauri_plugin_opener::open_url(url, None::<&str>).map_err(|e| e.to_string())?;
+        }
+        "open-devtools" => {
+            // Open the WebView developer tools for the main window so the shell
+            // page can be inspected. Compiled into release via the `devtools`
+            // default cargo feature (see Cargo.toml); in debug it is always on.
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.open_devtools();
+            }
+        }
         "copy-diagnostics" => {
             let diag = app.state::<Managed>().kernel.lock().unwrap().diagnostics();
             app.clipboard()
@@ -146,6 +239,16 @@ pub fn handle_tray_event(app: &AppHandle, id: &str) -> Result<(), String> {
                 .unwrap()
                 .log_path()
                 .to_path_buf();
+            tauri_plugin_opener::open_path(path, None::<&str>).map_err(|e| e.to_string())?;
+        }
+        "open-config" => {
+            // Open the persisted config.toml in the system default editor. If it
+            // does not exist yet (no settings saved so far), write the defaults
+            // first so the file can always be opened.
+            let path = crate::state::config_path();
+            if !path.exists() {
+                let _ = crate::state::AppState::default().save();
+            }
             tauri_plugin_opener::open_path(path, None::<&str>).map_err(|e| e.to_string())?;
         }
         "toggle-autostart" => {
