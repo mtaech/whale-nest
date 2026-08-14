@@ -14,3 +14,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Icon backup (pre-transparency originals)
+.icon-backup/
