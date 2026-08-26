@@ -30,6 +30,13 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<()> {
     let open_browser = MenuItem::with_id(app, "open-browser", "在浏览器打开", true, None::<&str>)?;
     let open_devtools =
         MenuItem::with_id(app, "open-devtools", "打开开发者工具", true, None::<&str>)?;
+    let inject_hud = MenuItem::with_id(
+        app,
+        "inject-debug-hud",
+        "📋 注入剪贴板排查器",
+        true,
+        None::<&str>,
+    )?;
     let copy_diag = MenuItem::with_id(app, "copy-diagnostics", "复制诊断信息", true, None::<&str>)?;
     let open_log = MenuItem::with_id(app, "open-log", "打开日志", true, None::<&str>)?;
     let open_config = MenuItem::with_id(app, "open-config", "打开配置文件", true, None::<&str>)?;
@@ -59,6 +66,7 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<()> {
     let devtools_sep = PredefinedMenuItem::separator(app)?;
     let more_items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = vec![
         &open_devtools as &dyn tauri::menu::IsMenuItem<tauri::Wry>,
+        &inject_hud as &dyn tauri::menu::IsMenuItem<tauri::Wry>,
         &copy_diag as &dyn tauri::menu::IsMenuItem<tauri::Wry>,
         &open_log as &dyn tauri::menu::IsMenuItem<tauri::Wry>,
         &open_config as &dyn tauri::menu::IsMenuItem<tauri::Wry>,
@@ -168,6 +176,14 @@ pub fn handle_tray_event(app: &AppHandle, id: &str) -> Result<(), String> {
             // default cargo feature (see Cargo.toml); in debug it is always on.
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.open_devtools();
+            }
+        }
+        "inject-debug-hud" => {
+            if let Some(window) = app.get_webview_window("main") {
+                let script = include_str!("../../src/debug-hud.js");
+                let _ = window.eval(script);
+                let _ = window.show();
+                let _ = window.set_focus();
             }
         }
         "copy-diagnostics" => {

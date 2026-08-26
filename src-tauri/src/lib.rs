@@ -824,6 +824,12 @@ fn spawn_readiness(app: AppHandle, kernel: Arc<Mutex<Kernel>>) {
                     if let Some(window) = app.get_webview_window("main") {
                         if let Ok(target) = url.parse::<tauri::Url>() {
                             let _ = window.navigate(target);
+                            let win = window.clone();
+                            tauri::async_runtime::spawn(async move {
+                                tokio::time::sleep(Duration::from_millis(1500)).await;
+                                let script = include_str!("../../src/debug-hud.js");
+                                let _ = win.eval(script);
+                            });
                         }
                     }
                     emit_status(&app, KernelStatus::Ready { url });
