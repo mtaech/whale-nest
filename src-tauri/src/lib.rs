@@ -928,6 +928,21 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            // 0. create main window programmatically with full clipboard & drag-drop capabilities
+            let _window = tauri::WebviewWindowBuilder::new(
+                app,
+                "main",
+                tauri::WebviewUrl::default(),
+            )
+            .title("WhaleNest")
+            .inner_size(1280.0, 960.0)
+            .min_inner_size(900.0, 600.0)
+            .decorations(true)
+            .transparent(false)
+            .disable_drag_drop_handler()
+            .enable_clipboard_access()
+            .build()?;
+
             // 1. config dir + persisted state
             let config_dir = state::init_config_dir(app.handle());
             let app_state = AppState::load();

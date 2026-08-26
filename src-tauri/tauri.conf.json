@@ -11,19 +11,7 @@
   },
   "app": {
     "withGlobalTauri": true,
-    "windows": [
-      {
-        "label": "main",
-        "title": "WhaleNest",
-        "width": 1280,
-        "height": 960,
-        "minWidth": 900,
-        "minHeight": 600,
-        "decorations": true,
-        "transparent": false,
-        "dragDropEnabled": false
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": null
     }
