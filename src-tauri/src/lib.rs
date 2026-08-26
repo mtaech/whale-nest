@@ -821,6 +821,11 @@ fn spawn_readiness(app: AppHandle, kernel: Arc<Mutex<Kernel>>) {
                             notify(&app2, "dsh 内核已就绪", &format!("访问地址：{url2}"));
                         });
                     }
+                    if let Some(window) = app.get_webview_window("main") {
+                        if let Ok(target) = url.parse::<tauri::Url>() {
+                            let _ = window.navigate(target);
+                        }
+                    }
                     emit_status(&app, KernelStatus::Ready { url });
                 }
                 Err(_) => {

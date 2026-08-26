@@ -161,17 +161,7 @@ function render(payload: ShellState | KernelStatusPayload): void {
   switch (payload.status) {
     case "ready":
       if (payload.url) {
-        if (dshFrame && hostEl) {
-          if (dshFrame.src !== payload.url) {
-            dshFrame.src = payload.url;
-          }
-          if (shellEl) {
-            shellEl.hidden = true;
-          }
-          hostEl.hidden = false;
-        } else {
-          window.location.href = payload.url;
-        }
+        window.location.replace(payload.url);
       } else {
         renderError("内核已就绪，但缺少访问地址");
       }
