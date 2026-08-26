@@ -6,9 +6,7 @@ use tauri::{AppHandle, CloseRequestApi, Manager, Runtime, Window};
 use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_clipboard_manager::ClipboardExt as _;
 
-use crate::{
-    check_update_async, install_update_async, restart_kernel_impl, Managed,
-};
+use crate::{check_update_async, install_update_async, restart_kernel_impl, Managed};
 
 /// Handle to the autostart checkbox, kept so the toggle can sync its state.
 static AUTOSTART_ITEM: std::sync::OnceLock<tauri::menu::CheckMenuItem<tauri::Wry>> =
@@ -23,14 +21,15 @@ static UPDATE_ITEM: std::sync::OnceLock<tauri::menu::MenuItem<tauri::Wry>> =
 /// 打开主界面 ── 重启 dsh 内核 / 在浏览器打开 ── 更多[打开开发者工具/复制诊断信息/打开日志/打开配置文件 ─ 检查更新/发现新版本] ── 开机自启(勾选) / 退出
 pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<()> {
     let managed = app.state::<Managed>();
-    let cfg = managed.config.lock().unwrap();
+    let cfg = managed.config.lock();
     let autostart = cfg.autostart;
     drop(cfg);
 
     let open_main = MenuItem::with_id(app, "open-main", "打开主界面", true, None::<&str>)?;
     let restart = MenuItem::with_id(app, "restart-kernel", "重启 dsh 内核", true, None::<&str>)?;
     let open_browser = MenuItem::with_id(app, "open-browser", "在浏览器打开", true, None::<&str>)?;
-    let open_devtools = MenuItem::with_id(app, "open-devtools", "打开开发者工具", true, None::<&str>)?;
+    let open_devtools =
+        MenuItem::with_id(app, "open-devtools", "打开开发者工具", true, None::<&str>)?;
     let copy_diag = MenuItem::with_id(app, "copy-diagnostics", "复制诊断信息", true, None::<&str>)?;
     let open_log = MenuItem::with_id(app, "open-log", "打开日志", true, None::<&str>)?;
     let open_config = MenuItem::with_id(app, "open-config", "打开配置文件", true, None::<&str>)?;
@@ -127,7 +126,6 @@ pub fn refresh_update_item(app: &AppHandle) {
         .state::<Managed>()
         .update
         .lock()
-        .unwrap()
         .as_ref()
         .map(|info| (info.has_update, info.latest.clone()))
         .unwrap_or((false, String::new()));
@@ -155,7 +153,7 @@ pub fn handle_tray_event(app: &AppHandle, id: &str) -> Result<(), String> {
         "restart-kernel" => restart_kernel_impl(app),
         "open-browser" => {
             // Open the current dsh web URL in the system browser.
-            let url = match &app.state::<Managed>().kernel.lock().unwrap().state {
+            let url = match &app.state::<Managed>().kernel.lock().state {
                 crate::kernel::KernelState::Ready { url, .. } => url.clone(),
                 _ => String::new(),
             };
@@ -173,7 +171,7 @@ pub fn handle_tray_event(app: &AppHandle, id: &str) -> Result<(), String> {
             }
         }
         "copy-diagnostics" => {
-            let diag = app.state::<Managed>().kernel.lock().unwrap().diagnostics();
+            let diag = app.state::<Managed>().kernel.lock().diagnostics();
             app.clipboard()
                 .write_text(diag)
                 .map_err(|e| e.to_string())?;
@@ -183,7 +181,6 @@ pub fn handle_tray_event(app: &AppHandle, id: &str) -> Result<(), String> {
                 .state::<Managed>()
                 .kernel
                 .lock()
-                .unwrap()
                 .log_path()
                 .to_path_buf();
             tauri_plugin_opener::open_path(path, None::<&str>).map_err(|e| e.to_string())?;
@@ -199,7 +196,7 @@ pub fn handle_tray_event(app: &AppHandle, id: &str) -> Result<(), String> {
             tauri_plugin_opener::open_path(path, None::<&str>).map_err(|e| e.to_string())?;
         }
         "toggle-autostart" => {
-            let new_val = !app.state::<Managed>().config.lock().unwrap().autostart;
+            let new_val = !app.state::<Managed>().config.lock().autostart;
             set_autostart(app, new_val)?;
             // Keep the checkbox in sync with the new value.
             if let Some(check) = AUTOSTART_ITEM.get() {
@@ -232,7 +229,7 @@ pub fn set_autostart(app: &AppHandle, enabled: bool) -> Result<(), String> {
         manager.disable().map_err(|e| e.to_string())?;
     }
     let managed = app.state::<Managed>();
-    let mut cfg = managed.config.lock().unwrap();
+    let mut cfg = managed.config.lock();
     cfg.autostart = enabled;
     let _ = cfg.save();
     Ok(())
@@ -241,8 +238,10 @@ pub fn set_autostart(app: &AppHandle, enabled: bool) -> Result<(), String> {
 /// Quit: kill the dsh kernel first, then exit the app for real.
 pub fn exit_app(app: &AppHandle) {
     let managed = app.state::<Managed>();
-    if let Ok(mut kernel) = managed.kernel.lock() {
-        let _ = kernel.kill();
-    }
+    managed
+        .shutting_down
+        .store(true, std::sync::atomic::Ordering::Release);
+    let mut kernel = managed.kernel.lock();
+    let _ = kernel.kill();
     app.exit(0);
 }

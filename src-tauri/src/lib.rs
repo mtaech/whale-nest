@@ -10,7 +10,11 @@ mod readiness;
 mod state;
 mod updater;
 
-use std::sync::{Arc, Mutex, OnceLock};
+use parking_lot::Mutex;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, OnceLock,
+};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -28,6 +32,8 @@ use updater::UpdateInfo;
 pub(crate) struct Managed {
     pub config: Arc<Mutex<AppState>>,
     pub kernel: Arc<Mutex<Kernel>>,
+    /// Set before final app exit so supervisors do not relaunch dsh.
+    pub shutting_down: Arc<AtomicBool>,
     /// Last update-check result; `None` until the first check completes.
     pub update: Arc<Mutex<Option<UpdateInfo>>>,
 }
@@ -119,7 +125,7 @@ fn emit_and_reset_view(app: &AppHandle, status: KernelStatus) {
 /// Initial kernel launch (or guide state when dsh is missing).
 pub(crate) fn start_kernel(app: &AppHandle) {
     let managed = app.state::<Managed>();
-    let mut kernel = managed.kernel.lock().unwrap();
+    let mut kernel = managed.kernel.lock();
     if !kernel.dsh_available() {
         drop(kernel);
         emit_status(app, KernelStatus::Guide);
@@ -151,10 +157,16 @@ pub(crate) fn start_kernel(app: &AppHandle) {
 /// the UI (no animation, no response) for seconds.
 pub(crate) fn restart_kernel_impl(app: &AppHandle) {
     let managed = app.state::<Managed>();
-    let dsh_available = managed.kernel.lock().unwrap().dsh_available();
-    if !dsh_available {
-        emit_status(app, KernelStatus::Guide);
-        return;
+    // Re-resolve dsh on every restart attempt: the guide view's 重新检测 /
+    // 一键安装 flows depend on picking up a newly installed dsh without an
+    // app restart (Kernel::new resolved only once).
+    {
+        let mut kernel = managed.kernel.lock();
+        if !kernel.redetect() {
+            drop(kernel);
+            emit_status(app, KernelStatus::Guide);
+            return;
+        }
     }
     // 1. Immediately tell the shell to show the loading view (and navigate
     //    the webview back to the shell page) while the restart is in flight.
@@ -166,7 +178,7 @@ pub(crate) fn restart_kernel_impl(app: &AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
         let managed = app.state::<Managed>();
-        let mut kernel = managed.kernel.lock().unwrap();
+        let mut kernel = managed.kernel.lock();
         let _ = kernel.kill();
         match kernel.spawn() {
             Ok(()) => {
@@ -194,13 +206,13 @@ pub(crate) fn switch_cwd(app: &AppHandle, new_cwd: std::path::PathBuf) {
     }
     let managed = app.state::<Managed>();
     {
-        let mut cfg = managed.config.lock().unwrap();
+        let mut cfg = managed.config.lock();
         cfg.cwd = new_cwd.clone();
         cfg.push_recent_dir(new_cwd.clone());
         let _ = cfg.save();
     }
     {
-        let mut k = managed.kernel.lock().unwrap();
+        let mut k = managed.kernel.lock();
         k.config.cwd = new_cwd;
     }
     restart_kernel_impl(app);
@@ -209,7 +221,7 @@ pub(crate) fn switch_cwd(app: &AppHandle, new_cwd: std::path::PathBuf) {
 /// Pop the native folder picker; on selection persist cwd and restart the kernel.
 pub(crate) fn prompt_switch_dir(app: &AppHandle) -> Result<(), String> {
     let managed = app.state::<Managed>();
-    let current = managed.config.lock().unwrap().cwd.clone();
+    let current = managed.config.lock().cwd.clone();
     let app2 = app.clone();
     app.dialog()
         .file()
@@ -228,7 +240,38 @@ pub(crate) fn prompt_switch_dir(app: &AppHandle) -> Result<(), String> {
 
 // ── IPC commands (contract with the shell frontend) ─────────────────────────
 
-/// get_state() -> { status, url?, message?, cwd, autostart, lock_port }
+/// Tool detection info
+#[derive(Clone, Serialize)]
+pub(crate) struct ToolInfo {
+    pub name: String,
+    pub found: bool,
+    pub version: Option<String>,
+    pub path: Option<String>,
+}
+
+/// Environment check results for node, npm, pnpm, dsh
+#[derive(Clone, Serialize)]
+pub(crate) struct EnvCheckResult {
+    pub node: ToolInfo,
+    pub npm: ToolInfo,
+    pub pnpm: ToolInfo,
+    pub dsh: ToolInfo,
+    pub all_passed: bool,
+}
+
+/// Recommended plugin item from melon repo
+#[derive(Clone, Serialize)]
+pub(crate) struct RepoPluginItem {
+    pub id: String,
+    pub name: String,
+    pub package_name: String,
+    pub description: String,
+    pub installed: bool,
+    pub version: Option<String>,
+    pub category: String,
+}
+
+/// get_state() -> { status, url?, message?, cwd, autostart, lock_port, initialized }
 #[derive(Serialize)]
 pub(crate) struct StateResponse {
     pub status: String,
@@ -239,12 +282,273 @@ pub(crate) struct StateResponse {
     pub cwd: String,
     pub autostart: bool,
     pub lock_port: bool,
+    pub initialized: bool,
+}
+
+fn resolve_binary_path_helper(name: &str) -> Option<String> {
+    if let Some(path_var) = std::env::var_os("PATH") {
+        #[cfg(windows)]
+        {
+            let exts = [".cmd", ".exe", ".bat", ".ps1", ""];
+            for dir in std::env::split_paths(&path_var) {
+                for ext in exts {
+                    let full = format!("{}{}", name, ext);
+                    let p = dir.join(&full);
+                    if p.is_file() {
+                        return Some(p.to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let mut paths: Vec<std::path::PathBuf> = std::env::split_paths(&path_var).collect();
+            if let Some(home) = std::env::var_os("HOME") {
+                let home_path = std::path::PathBuf::from(home);
+                paths.push(home_path.join(".local/bin"));
+                paths.push(home_path.join(".volta/bin"));
+            }
+            for dir in paths {
+                let p = dir.join(name);
+                if p.is_file() {
+                    return Some(p.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn probe_command(bin: &str, args: &[&str]) -> (bool, Option<String>, Option<String>) {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    let path = resolve_binary_path_helper(bin);
+    let mut cmd = if let Some(ref p) = path {
+        Command::new(p)
+    } else {
+        Command::new(bin)
+    };
+    cmd.args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(_) => return (false, None, path),
+    };
+
+    let mut child = child;
+    let deadline = Instant::now() + Duration::from_millis(3000);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if status.success() {
+                    if let Some(mut out) = child.stdout.take() {
+                        let mut buf = String::new();
+                        let _ = std::io::Read::read_to_string(&mut out, &mut buf);
+                        let trimmed = buf.trim().to_string();
+                        let first_line = trimmed.lines().next().unwrap_or("").trim().to_string();
+                        return (true, Some(first_line), path);
+                    }
+                    return (true, None, path);
+                } else {
+                    return (true, None, path);
+                }
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    return (true, None, path);
+                }
+                std::thread::sleep(Duration::from_millis(30));
+            }
+            Err(_) => return (false, None, path),
+        }
+    }
+}
+
+fn read_installed_dsh_plugins() -> Vec<String> {
+    #[cfg(windows)]
+    let home = std::env::var_os("USERPROFILE").map(std::path::PathBuf::from);
+    #[cfg(not(windows))]
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+
+    let Some(home_path) = home else {
+        return Vec::new();
+    };
+    let pkg_path = home_path
+        .join(".dsh")
+        .join("profiles")
+        .join("web")
+        .join("package.json");
+
+    if let Ok(text) = std::fs::read_to_string(&pkg_path) {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+            let mut installed = Vec::new();
+            if let Some(deps) = json.get("dependencies").and_then(|d| d.as_object()) {
+                for key in deps.keys() {
+                    installed.push(key.clone());
+                }
+            }
+            if let Some(bundles) = json
+                .pointer("/dsh/profile/bundles")
+                .and_then(|b| b.as_array())
+            {
+                for b in bundles {
+                    if let Some(s) = b.as_str() {
+                        if !installed.contains(&s.to_string()) {
+                            installed.push(s.to_string());
+                        }
+                    }
+                }
+            }
+            return installed;
+        }
+    }
+    Vec::new()
+}
+
+fn get_repo_plugins_list() -> Vec<RepoPluginItem> {
+    let installed = read_installed_dsh_plugins();
+
+    let defs = [
+        (
+            "dsh-skin-material-you",
+            "Material You 主题皮肤",
+            "dsh-skin-material-you",
+            "Material You (Material 3) 浅深色质感皮肤，优雅动效与精致色彩。",
+            "外观主题",
+        ),
+        (
+            "dsh-plugin-dashboard",
+            "插件版本仪表盘",
+            "dsh-plugin-dashboard",
+            "在设置面板中集中展示已安装插件、检测最新版本并提供一键升级与管理。",
+            "扩展增强",
+        ),
+        (
+            "dsh-browser-tool",
+            "浏览器驱动工具",
+            "dsh-browser-tool",
+            "支持无头 Chromium、CDP 连接与真实 Chrome Relay 控制，网页分析与截图。",
+            "核心工具",
+        ),
+        (
+            "dsh-ast-edit-tool",
+            "AST 结构化代码编辑",
+            "dsh-ast-edit-tool",
+            "基于 ast-grep 的代码结构重构与预览工具，支持高精度代码变换。",
+            "核心工具",
+        ),
+    ];
+
+    defs.iter()
+        .map(|(id, name, pkg, desc, cat)| {
+            let is_inst = installed.iter().any(|item| item == *pkg);
+            RepoPluginItem {
+                id: id.to_string(),
+                name: name.to_string(),
+                package_name: pkg.to_string(),
+                description: desc.to_string(),
+                installed: is_inst,
+                version: None,
+                category: cat.to_string(),
+            }
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn check_env() -> EnvCheckResult {
+    let (node_found, node_ver, node_path) = probe_command("node", &["-v"]);
+    let (npm_found, npm_ver, npm_path) = probe_command("npm", &["-v"]);
+    let (pnpm_found, pnpm_ver, pnpm_path) = probe_command("pnpm", &["-v"]);
+    let (dsh_found, dsh_ver, dsh_path) = probe_command("dsh", &["--version"]);
+
+    let all_passed = node_found && npm_found && dsh_found;
+
+    EnvCheckResult {
+        node: ToolInfo {
+            name: "Node.js".into(),
+            found: node_found,
+            version: node_ver,
+            path: node_path,
+        },
+        npm: ToolInfo {
+            name: "npm".into(),
+            found: npm_found,
+            version: npm_ver,
+            path: npm_path,
+        },
+        pnpm: ToolInfo {
+            name: "pnpm".into(),
+            found: pnpm_found,
+            version: pnpm_ver,
+            path: pnpm_path,
+        },
+        dsh: ToolInfo {
+            name: "DeepSeek Harness (dsh)".into(),
+            found: dsh_found,
+            version: dsh_ver,
+            path: dsh_path,
+        },
+        all_passed,
+    }
+}
+
+#[tauri::command]
+fn get_recommended_plugins() -> Vec<RepoPluginItem> {
+    get_repo_plugins_list()
+}
+
+#[tauri::command]
+fn install_plugin(app: AppHandle, package_name: String) -> Result<(), String> {
+    let app2 = app.clone();
+    std::thread::spawn(move || {
+        use std::process::Command;
+        use std::process::Stdio;
+
+        // Try dsh plugin --profile web add <pkg>
+        let status = Command::new("dsh")
+            .args(["plugin", "--profile", "web", "add", &package_name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+
+        let ok = match status {
+            Ok(s) => s.success(),
+            Err(_) => false,
+        };
+
+        let _ = app2.emit(
+            "plugin-installed",
+            serde_json::json!({
+                "package_name": package_name,
+                "success": ok
+            }),
+        );
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn complete_setup(app: AppHandle, state: tauri::State<'_, Managed>) -> Result<(), String> {
+    {
+        let mut cfg = state.config.lock();
+        cfg.initialized = true;
+        let _ = cfg.save();
+    }
+    // Start kernel now if dsh is available
+    start_kernel(&app);
+    Ok(())
 }
 
 #[tauri::command]
 fn get_state(state: tauri::State<'_, Managed>) -> StateResponse {
-    let cfg = state.config.lock().unwrap();
-    let kernel = state.kernel.lock().unwrap();
+    let cfg = state.config.lock();
+    let kernel = state.kernel.lock();
     let (status, url, message) = if !kernel.dsh_available() {
         ("guide".to_string(), None, None)
     } else {
@@ -263,6 +567,7 @@ fn get_state(state: tauri::State<'_, Managed>) -> StateResponse {
         cwd: cfg.cwd.to_string_lossy().into_owned(),
         autostart: cfg.autostart,
         lock_port: cfg.lock_port,
+        initialized: cfg.initialized,
     }
 }
 
@@ -277,12 +582,12 @@ fn set_working_dir(app: AppHandle) -> Result<(), String> {
 fn set_lock_port(app: AppHandle, enabled: bool) -> Result<(), String> {
     let managed = app.state::<Managed>();
     {
-        let mut cfg = managed.config.lock().unwrap();
+        let mut cfg = managed.config.lock();
         cfg.lock_port = enabled;
         let _ = cfg.save();
     }
     {
-        let mut k = managed.kernel.lock().unwrap();
+        let mut k = managed.kernel.lock();
         k.config.lock_port = enabled;
     }
     restart_kernel_impl(&app);
@@ -297,18 +602,18 @@ fn restart_kernel(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 fn get_diagnostics(state: tauri::State<'_, Managed>) -> String {
-    state.kernel.lock().unwrap().diagnostics()
+    state.kernel.lock().diagnostics()
 }
 
 #[tauri::command]
 fn open_log_file(_app: AppHandle, state: tauri::State<'_, Managed>) -> Result<(), String> {
-    let path = state.kernel.lock().unwrap().log_path().to_path_buf();
+    let path = state.kernel.lock().log_path().to_path_buf();
     tauri_plugin_opener::open_path(path, None::<&str>).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn copy_diagnostics(app: AppHandle, state: tauri::State<'_, Managed>) -> Result<(), String> {
-    let diag = state.kernel.lock().unwrap().diagnostics();
+    let diag = state.kernel.lock().diagnostics();
     app.clipboard().write_text(diag).map_err(|e| e.to_string())
 }
 
@@ -353,12 +658,12 @@ pub(crate) fn check_update_async(app: AppHandle) {
         let managed = app.state::<Managed>();
         match result {
             Some(info) => {
-                *managed.update.lock().unwrap() = Some(info.clone());
+                *managed.update.lock() = Some(info.clone());
                 emit_update(&app2, &info);
             }
             None => {
                 // Offline / dsh missing: stay silent — never nag.
-                *managed.update.lock().unwrap() = None;
+                *managed.update.lock() = None;
             }
         }
         // Refresh the tray item regardless of outcome.
@@ -426,14 +731,21 @@ fn install_dsh(app: AppHandle) -> Result<(), String> {
 // ── background supervision ──────────────────────────────────────────────────
 
 /// Watch the child process; on spontaneous exit do crash accounting and
-/// bounded auto-restart (intentional kills never reach this path — kill()
-/// detaches the child while holding the lock).
-fn spawn_kernel_watcher(app: AppHandle, kernel: Arc<Mutex<Kernel>>) {
+/// bounded auto-restart. Final application shutdown stops this loop before it
+/// can interpret the intentional tree kill as a crash.
+fn spawn_kernel_watcher(
+    app: AppHandle,
+    kernel: Arc<Mutex<Kernel>>,
+    shutting_down: Arc<AtomicBool>,
+) {
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_millis(300));
+        if shutting_down.load(Ordering::Acquire) {
+            return;
+        }
         let mut exited = None;
         {
-            let mut k = kernel.lock().unwrap();
+            let mut k = kernel.lock();
             if let Some(child) = k.child.as_mut() {
                 if let Ok(Some(status)) = child.try_wait() {
                     exited = Some(status);
@@ -479,7 +791,7 @@ fn spawn_readiness(app: AppHandle, kernel: Arc<Mutex<Kernel>>) {
         loop {
             tokio::time::sleep(Duration::from_millis(300)).await;
             let (port, timeout) = {
-                let k = kernel.lock().unwrap();
+                let k = kernel.lock();
                 (k.current_port(), k.remaining_ready_timeout())
             };
             let Some(port) = port else { continue };
@@ -489,7 +801,7 @@ fn spawn_readiness(app: AppHandle, kernel: Arc<Mutex<Kernel>>) {
             let readiness = Readiness::new(base_url);
             match readiness.wait_until_ready(timeout).await {
                 Ok(url) => {
-                    let mut k = kernel.lock().unwrap();
+                    let mut k = kernel.lock();
                     if k.ready_emitted || k.current_port != Some(port) {
                         continue;
                     }
@@ -512,7 +824,7 @@ fn spawn_readiness(app: AppHandle, kernel: Arc<Mutex<Kernel>>) {
                     emit_status(&app, KernelStatus::Ready { url });
                 }
                 Err(_) => {
-                    let mut k = kernel.lock().unwrap();
+                    let mut k = kernel.lock();
                     if k.ready_emitted
                         || k.timeout_emitted
                         || k.current_port != Some(port)
@@ -542,6 +854,25 @@ fn spawn_readiness(app: AppHandle, kernel: Arc<Mutex<Kernel>>) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // ── GPU acceleration & WebView rendering optimizations ──────────────────
+    #[cfg(target_os = "windows")]
+    {
+        // Enable Chromium GPU rasterization, zero-copy tile transfer, and bypass conservative GPU blocklists
+        if std::env::var_os("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").is_none() {
+            std::env::set_var(
+                "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+                "--enable-gpu-rasterization --enable-zero-copy --ignore-gpu-blocklist --enable-features=VaapiVideoDecoder,CanvasOopif,RawDraw",
+            );
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // Force hardware compositing mode on Linux WebKitGTK to avoid software rasterizer fallback
+        if std::env::var_os("WEBKIT_FORCE_COMPOSITING_MODE").is_none() {
+            std::env::set_var("WEBKIT_FORCE_COMPOSITING_MODE", "1");
+        }
+    }
+
     tauri::Builder::default()
         // Single instance: a second launch focuses the existing main window.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -573,6 +904,10 @@ pub fn run() {
             check_update,
             install_update,
             install_dsh,
+            check_env,
+            get_recommended_plugins,
+            install_plugin,
+            complete_setup,
             quit
         ])
         // Close = hide to tray; dsh keeps running in the background.
@@ -603,6 +938,7 @@ pub fn run() {
             app.manage(Managed {
                 config: config_arc.clone(),
                 kernel: kernel_arc.clone(),
+                shutting_down: Arc::new(AtomicBool::new(false)),
                 update: Arc::new(Mutex::new(None)),
             });
 
@@ -619,17 +955,19 @@ pub fn run() {
             //     disables the hotkey — never crashes startup.
             {
                 use tauri_plugin_global_shortcut::GlobalShortcutExt as _;
-                if let Err(e) = app
-                    .global_shortcut()
-                    .on_shortcut("Ctrl+Alt+W", move |app, _shortcut, _event| {
+                if let Err(e) = app.global_shortcut().on_shortcut(
+                    "Ctrl+Alt+W",
+                    move |app, _shortcut, _event| {
                         if let Some(window) = app.get_webview_window("main") {
                             let _ = window.show();
                             let _ = window.unminimize();
                             let _ = window.set_focus();
                         }
-                    })
-                {
-                    eprintln!("[whalenest] 全局快捷键 Ctrl+Alt+W 注册失败（可能已被其他程序占用）: {e}");
+                    },
+                ) {
+                    eprintln!(
+                        "[whalenest] 全局快捷键 Ctrl+Alt+W 注册失败（可能已被其他程序占用）: {e}"
+                    );
                 }
             }
 
@@ -650,11 +988,17 @@ pub fn run() {
                 }
             }
 
-            // 8. start the kernel (or emit guide when dsh is missing)
-            start_kernel(app.handle());
+            // 8. start the kernel (or emit guide when dsh is missing, unless in step init wizard)
+            if app_state.initialized {
+                start_kernel(app.handle());
+            }
 
             // 9. background supervision
-            spawn_kernel_watcher(app.handle().clone(), kernel_arc.clone());
+            spawn_kernel_watcher(
+                app.handle().clone(),
+                kernel_arc.clone(),
+                app.state::<Managed>().shutting_down.clone(),
+            );
             spawn_readiness(app.handle().clone(), kernel_arc.clone());
 
             // 10. delayed update check (off the critical startup path, silent on failure)

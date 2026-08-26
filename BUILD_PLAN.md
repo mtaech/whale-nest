@@ -75,10 +75,15 @@ Tauri v2 + Vite 桌面壳，宿主 DeepSeek Harness (dsh) 内核。
 
     pub enum DshExec {
         WindowsCmd { shim: PathBuf }, // dsh.cmd（volta 镜像目录，与 node.exe 同目录）
-        UnixSh { shim: PathBuf },     // dsh shell 脚本
+        UnixSh { shim: PathBuf, interpreter: Option<Vec<String>> },
+        // dsh shell 脚本；interpreter = 探测时解析出的 shebang 解释器
+        // （如 ["/usr/bin/zsh"] / ["/home/u/.volta/bin/node"]），None = 无 shebang
     }
 
-    /// 解析 dsh 可执行文件：Windows 找 volta 镜像目录里的 dsh.cmd；Linux 找 PATH 上的 dsh
+    /// 解析 dsh 可执行文件：Windows 找 volta 镜像目录里的 dsh.cmd；
+    /// Linux 两轮探测——应用自身 PATH(+~/.local/bin) 优先，未命中再探测
+    /// 用户登录 shell 的 PATH（`$SHELL -lic`，覆盖 .zshrc/.bashrc 里的
+    /// volta/nvm/mise 路径），并校验脚本 shebang 解释器（node/zsh/bash）可解析
     pub fn resolve_dsh() -> Result<DshExec, DshNotFound>;
 
     /// 内核状态机

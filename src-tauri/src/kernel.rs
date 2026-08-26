@@ -5,13 +5,16 @@
 //! process. KernelConfig parameterises profile / port / cwd / patches /
 //! DSH_HOME so future extensions swap behaviour by changing config, not code.
 
+use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Crash-stop window: N abnormal exits inside this window trips the brake.
@@ -53,29 +56,50 @@ pub struct KernelConfig {
 #[derive(Clone, Debug)]
 pub enum DshExec {
     /// dsh.cmd (volta image dir, sibling of node.exe); .ps1 handled too.
+    #[allow(dead_code)] // constructed on windows targets only
     WindowsCmd { shim: PathBuf },
-    /// dsh shell script on PATH (Linux/macOS).
+    /// dsh shell script on PATH (Linux/macOS). `interpreter` is the shebang
+    /// parsed at detect time and resolved to a concrete program + fixed args
+    /// (e.g. `["/usr/bin/zsh"]`, `["/home/u/.volta/bin/node"]`), so we never
+    /// rely on bash/sh assumptions or on the interpreter being on the app's
+    /// PATH at spawn time. `None` = no usable shebang (binary / plain script).
     #[allow(dead_code)] // constructed on unix targets only
-    UnixSh { shim: PathBuf },
+    UnixSh {
+        shim: PathBuf,
+        interpreter: Option<Vec<String>>,
+    },
 }
 
 /// Raised when no dsh launcher can be resolved (frontend shows the guide).
+/// The string carries a human-readable reason when one is known (e.g. the
+/// script exists but its shebang interpreter is missing).
 #[derive(Debug)]
-pub struct DshNotFound;
+pub struct DshNotFound(pub String);
 
 impl std::fmt::Display for DshNotFound {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "未找到 dsh 可执行文件（dsh.cmd / dsh）")
+        if self.0.is_empty() {
+            write!(f, "未找到 dsh 可执行文件（dsh.cmd / dsh）")
+        } else {
+            write!(f, "{}", self.0)
+        }
     }
 }
 impl std::error::Error for DshNotFound {}
 
 /// Resolve the dsh executable.
 /// Windows: scan PATH (semicolon-split) for dsh.cmd, then dsh, dsh.ps1, dsh.exe.
-/// Linux: scan PATH (colon-split) for the dsh shell script.
+/// Linux: two-pass lookup.
+///   Pass 1 — the app's own PATH (+ ~/.local/bin): fast, no subprocess.
+///   Pass 2 — the user's login-shell PATH (`$SHELL -lic`, so .zshrc/.bashrc
+///   volta/nvm/mise entries count): desktop-launched apps never source rc
+///   files, so dsh may only be reachable there.
+/// Each candidate is validated: the script must exist AND its shebang
+/// interpreter (e.g. node/zsh/bash) must resolve to an executable — a script
+/// whose interpreter is missing is reported as not-found with a reason.
 pub fn resolve_dsh() -> Result<DshExec, DshNotFound> {
     let Some(path_var) = std::env::var_os("PATH") else {
-        return Err(DshNotFound);
+        return Err(DshNotFound(String::new()));
     };
     #[cfg(windows)]
     {
@@ -88,18 +112,211 @@ pub fn resolve_dsh() -> Result<DshExec, DshNotFound> {
                 }
             }
         }
-        Err(DshNotFound)
+        Err(DshNotFound(String::new()))
     }
     #[cfg(not(windows))]
     {
-        for dir in std::env::split_paths(&path_var) {
-            let candidate = dir.join("dsh");
-            if candidate.is_file() {
-                return Ok(DshExec::UnixSh { shim: candidate });
+        let app_paths: Vec<PathBuf> = std::env::split_paths(&path_var)
+            .map(PathBuf::from)
+            .collect();
+        // ~/.local/bin: XDG convention, typically in .profile — never in a
+        // desktop-launched app's PATH.
+        let mut paths = app_paths;
+        if let Some(home) = std::env::var_os("HOME") {
+            paths.push(PathBuf::from(home).join(".local/bin"));
+        }
+        let mut first_reason: Option<String> = None;
+
+        // Pass 1: dsh on the app's own PATH.
+        for dir in &paths {
+            let cand = dir.join("dsh");
+            if cand.is_file() {
+                match validate_script(&cand, &paths) {
+                    Ok(exec) => return Ok(exec),
+                    Err(reason) => {
+                        first_reason.get_or_insert(reason);
+                    }
+                }
             }
         }
-        Err(DshNotFound)
+        // Pass 2: the user's login shell may be the only place dsh (and its
+        // interpreter) lives — volta / nvm / mise configured in .zshrc /
+        // .bashrc. Probe the shell once, merge its PATH in, retry.
+        if let Some(shell_path) = login_shell_path() {
+            let mut merged = paths;
+            merged.extend(
+                std::env::split_paths(std::ffi::OsStr::new(&shell_path)).map(PathBuf::from),
+            );
+            for dir in &merged {
+                let cand = dir.join("dsh");
+                if cand.is_file() {
+                    match validate_script(&cand, &merged) {
+                        Ok(exec) => return Ok(exec),
+                        Err(reason) => {
+                            first_reason.get_or_insert(reason);
+                        }
+                    }
+                }
+            }
+        }
+        Err(DshNotFound(first_reason.unwrap_or_default()))
     }
+}
+
+/// Verify a found `dsh` script is actually runnable: its shebang parses and
+/// the interpreter resolves against `lookup`. Scripts without a shebang
+/// (binaries, plain scripts) pass through with `interpreter: None`.
+#[cfg(not(windows))]
+fn validate_script(shim: &Path, lookup: &[PathBuf]) -> Result<DshExec, String> {
+    let interpreter = match parse_shebang(shim, lookup) {
+        Some(Ok(v)) => Some(v),
+        Some(Err(reason)) => return Err(reason),
+        None => None,
+    };
+    Ok(DshExec::UnixSh {
+        shim: shim.to_path_buf(),
+        interpreter,
+    })
+}
+
+/// Parse a script's shebang into a concrete interpreter invocation.
+/// `lookup` resolves `/usr/bin/env NAME` (and bare relative names).
+/// `None` = no shebang at all. `Some(Err)` = malformed / unresolvable.
+#[cfg(not(windows))]
+fn parse_shebang(shim: &Path, lookup: &[PathBuf]) -> Option<Result<Vec<String>, String>> {
+    let mut f = File::open(shim).ok()?;
+    let mut head = [0u8; 4096];
+    let n = f.read(&mut head).ok()?;
+    let Some(idx) = head[..n].iter().position(|&b| b == b'\n') else {
+        return Some(Err("dsh 脚本首行无换行，无法解析解释器".into()));
+    };
+    let line = String::from_utf8_lossy(&head[..idx]);
+    let rest = line.trim_start();
+    if !rest.starts_with("#!") {
+        return None; // binary / plain script
+    }
+    let mut toks = rest[2..].split_whitespace();
+    let Some(prog) = toks.next() else {
+        return Some(Err("dsh 脚本的 shebang 为空".into()));
+    };
+    let args: Vec<String> = toks.map(str::to_string).collect();
+    let mut all: Vec<String> = Vec::new();
+    if prog == "/usr/bin/env" || prog == "env" {
+        // `env [-S] NAME [ARGS…]` — resolve NAME against the search paths.
+        let mut it = args.into_iter();
+        let first = it.next().unwrap_or_default();
+        let (name, rest) = if first == "-S" {
+            match it.next() {
+                Some(n) => (n, it.collect::<Vec<_>>()),
+                None => return Some(Err("dsh 的 shebang `env -S` 缺少命令名".into())),
+            }
+        } else {
+            (first, it.collect::<Vec<_>>())
+        };
+        match lookup_in_paths(&name, lookup) {
+            Some(path) => {
+                all.push(path);
+                all.extend(rest);
+            }
+            None => return Some(Err(format!("找到 dsh 脚本，但其解释器 `{name}` 不在 PATH"))),
+        }
+    } else if prog.contains('/') {
+        let p = PathBuf::from(prog);
+        if !is_executable(&p) {
+            return Some(Err(format!("dsh 脚本的解释器 {prog} 不存在或不可执行")));
+        }
+        all.push(prog.to_string());
+        all.extend(args);
+    } else {
+        match lookup_in_paths(prog, lookup) {
+            Some(path) => {
+                all.push(path);
+                all.extend(args);
+            }
+            None => return Some(Err(format!("dsh 脚本的解释器 `{prog}` 不在 PATH"))),
+        }
+    }
+    Some(Ok(all))
+}
+
+/// First executable `name` found in `paths`.
+#[cfg(not(windows))]
+fn lookup_in_paths(name: &str, paths: &[PathBuf]) -> Option<String> {
+    for dir in paths {
+        let c = dir.join(name);
+        if c.is_file() && is_executable(&c) {
+            return Some(c.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+#[cfg(not(windows))]
+fn is_executable(p: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(p)
+        .map(|m| m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+/// User's login shell (or a sane fallback).
+#[cfg(not(windows))]
+fn login_shell() -> Option<PathBuf> {
+    std::env::var_os("SHELL")
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+        .or_else(|| {
+            ["/bin/bash", "/bin/zsh", "/bin/sh"]
+                .into_iter()
+                .map(PathBuf::from)
+                .find(|p| p.is_file())
+        })
+}
+
+/// Run one command in the user's shell; returns the last stdout line.
+/// `flags` like "-lic" (login + interactive, so .zshrc/.bashrc run and
+/// contribute PATH); stdin is null so prompt-y rc code hits EOF instead of
+/// hanging. Killed after a 1.5s budget.
+#[cfg(not(windows))]
+fn shell_probe(shell: &Path, flags: &str, cmd: &str) -> Option<String> {
+    let mut child = Command::new(shell)
+        .args([flags, cmd])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + Duration::from_millis(1500);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    let mut out = String::new();
+    child.stdout.take()?.read_to_string(&mut out).ok()?;
+    // rc files may print noise first; our command's output is last and has no
+    // trailing newline (printf %s), so the last line is exactly what we asked.
+    let last = out.rsplit('\n').next().unwrap_or("").trim().to_string();
+    if last.is_empty() {
+        None
+    } else {
+        Some(last)
+    }
+}
+
+/// PATH as seen by the user's login shell (rc-file contributions included).
+#[cfg(not(windows))]
+fn login_shell_path() -> Option<String> {
+    let shell = login_shell()?;
+    shell_probe(&shell, "-lic", "printf %s \"$PATH\"")
+        .or_else(|| shell_probe(&shell, "-lc", "printf %s \"$PATH\""))
+        .or_else(|| shell_probe(&shell, "-c", "printf %s \"$PATH\""))
 }
 
 /// Kernel state machine.
@@ -195,6 +412,9 @@ pub struct Kernel {
     log_path: PathBuf,
     log_writer: Arc<Mutex<LogWriter>>,
     exec: Option<DshExec>,
+    /// Why detection failed (DshNotFound reason), for diagnostics; None when
+    /// dsh is available or detection has not run.
+    pub(crate) exec_error: Option<String>,
     pub(crate) child: Option<Child>,
     /// Port actually handed to dsh (resolved at spawn time).
     pub(crate) current_port: Option<u16>,
@@ -208,7 +428,10 @@ pub struct Kernel {
 
 impl Kernel {
     pub fn new(config: KernelConfig, log_path: PathBuf) -> Self {
-        let exec = resolve_dsh().ok();
+        let (exec, exec_error) = match resolve_dsh() {
+            Ok(e) => (Some(e), None),
+            Err(e) => (None, Some(e.to_string())),
+        };
         let log_writer = Arc::new(Mutex::new(LogWriter::open(&log_path)));
         Self {
             config,
@@ -216,6 +439,7 @@ impl Kernel {
             log_path,
             log_writer,
             exec,
+            exec_error,
             child: None,
             current_port: None,
             ready_emitted: false,
@@ -229,6 +453,25 @@ impl Kernel {
 
     pub fn dsh_available(&self) -> bool {
         self.exec.is_some()
+    }
+
+    /// Re-run PATH resolution and refresh the cached executable.
+    /// `Kernel::new` resolves only once; the guide view's 重新检测 / 一键安装
+    /// flows call this (via restart_kernel_impl) to pick up a newly installed
+    /// dsh without an app restart. Returns true when a launcher is available.
+    pub fn redetect(&mut self) -> bool {
+        match resolve_dsh() {
+            Ok(e) => {
+                self.exec = Some(e);
+                self.exec_error = None;
+                true
+            }
+            Err(e) => {
+                self.exec = None;
+                self.exec_error = Some(e.to_string());
+                false
+            }
+        }
     }
 
     pub fn log_path(&self) -> &Path {
@@ -275,6 +518,18 @@ impl Kernel {
         let mut command = build_unix_command(exec, &port_str);
 
         command.current_dir(&self.config.cwd);
+        // The dsh shim may spawn node and other descendants. Put the entire
+        // launch chain in its own process group so Unix shutdown can reap the
+        // whole tree instead of leaving the web server bound to its old port.
+        #[cfg(unix)]
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpgid(0, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
         if let Some(home) = &self.config.home {
             command.env("DSH_HOME", home);
         }
@@ -291,14 +546,13 @@ impl Kernel {
         if let Some(err) = child.stderr.take() {
             spawn_log_reader(err, writer.clone(), "stderr");
         }
-        if let Ok(mut w) = self.log_writer.lock() {
-            let _ = w.write_line(&format!(
-                "=== dsh kernel start: profile={}, port={}, cwd={} ===",
-                self.config.profile,
-                port,
-                self.config.cwd.display()
-            ));
-        }
+        let mut w = self.log_writer.lock();
+        let _ = w.write_line(&format!(
+            "=== dsh kernel start: profile={}, port={}, cwd={} ===",
+            self.config.profile,
+            port,
+            self.config.cwd.display()
+        ));
 
         self.child = Some(child);
         self.state = KernelState::Starting;
@@ -328,12 +582,17 @@ impl Kernel {
                     .stderr(Stdio::null())
                     .status();
             }
+            #[cfg(unix)]
+            {
+                // Negative PID targets the process group created in spawn().
+                // Ignore ESRCH: the group may already have exited naturally.
+                let _ = unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
+            }
             let _ = child.kill();
             let _ = child.wait();
         }
-        if let Ok(mut w) = self.log_writer.lock() {
-            let _ = w.write_line("=== dsh kernel stopped ===");
-        }
+        let mut w = self.log_writer.lock();
+        let _ = w.write_line("=== dsh kernel stopped ===");
         self.state = KernelState::Stopped;
         Ok(())
     }
@@ -406,12 +665,15 @@ impl Kernel {
             .exec
             .as_ref()
             .map(|e| match e {
-                DshExec::WindowsCmd { shim } | DshExec::UnixSh { shim } => {
+                DshExec::WindowsCmd { shim } | DshExec::UnixSh { shim, .. } => {
                     shim.display().to_string()
                 }
             })
             .unwrap_or_else(|| "未找到".to_string());
         s.push_str(&format!("dsh 可执行文件: {dsh}\n"));
+        if let Some(err) = &self.exec_error {
+            s.push_str(&format!("dsh 探测详情: {err}\n"));
+        }
         s.push_str(&format!("内核状态: {:?}\n", self.state));
         s.push_str(&format!("profile: {}\n", self.config.profile));
         s.push_str(&format!("工作目录: {}\n", self.config.cwd.display()));
@@ -428,7 +690,7 @@ impl Kernel {
 
     fn node_version(&self) -> Option<String> {
         let dir = match self.exec.as_ref()? {
-            DshExec::WindowsCmd { shim } | DshExec::UnixSh { shim } => {
+            DshExec::WindowsCmd { shim } | DshExec::UnixSh { shim, .. } => {
                 shim.parent().map(|p| p.to_path_buf())?
             }
         };
@@ -510,33 +772,43 @@ fn build_windows_command(exec: &DshExec, port: &str) -> Command {
             "-File",
             shim_str.as_str(),
             "web",
+            "--no-open",
             "--port",
             port,
         ]);
         c
     } else {
         let mut c = Command::new("cmd");
-        c.args(["/C", shim_str.as_str(), "web", "--port", port]);
+        c.args(["/C", shim_str.as_str(), "web", "--no-open", "--port", port]);
         c
     }
 }
 
 #[cfg(not(windows))]
 fn build_unix_command(exec: &DshExec, port: &str) -> Command {
-    let DshExec::UnixSh { shim } = exec else {
+    let DshExec::UnixSh { shim, interpreter } = exec else {
         unreachable!("unix resolve_dsh always returns UnixSh")
     };
-    use std::os::unix::fs::PermissionsExt;
-    let is_exec = fs::metadata(shim)
-        .map(|m| m.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false);
-    if is_exec {
+    if let Some(v) = interpreter {
+        // Run through the script's declared interpreter, resolved to a
+        // concrete path at detect time. Deterministic and correct whether the
+        // script is bash/zsh/node flavoured, and independent of the
+        // interpreter being on the app's PATH at spawn time.
+        let mut c = Command::new(&v[0]);
+        if v.len() > 1 {
+            c.args(&v[1..]);
+        }
+        c.arg(shim).args(["web", "--no-open", "--port", port]);
+        return c;
+    }
+    // No shebang: a real binary → exec directly; otherwise sh fallback.
+    if is_executable(shim) {
         let mut c = Command::new(shim);
-        c.args(["web", "--port", port]);
+        c.args(["web", "--no-open", "--port", port]);
         c
     } else {
         let mut c = Command::new("sh");
-        c.arg(shim).args(["web", "--port", port]);
+        c.arg(shim).args(["web", "--no-open", "--port", port]);
         c
     }
 }
@@ -557,9 +829,8 @@ fn spawn_log_reader<R: Read + Send + 'static>(
                 Ok(_) => {
                     let trimmed = line.trim_end();
                     if !trimmed.is_empty() {
-                        if let Ok(mut w) = writer.lock() {
-                            let _ = w.write_line(&format!("[{tag}] {trimmed}"));
-                        }
+                        let mut w = writer.lock();
+                        let _ = w.write_line(&format!("[{tag}] {trimmed}"));
                     }
                 }
             }

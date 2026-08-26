@@ -35,6 +35,9 @@ pub struct AppState {
     /// Recently used working directories, most recent first (tray quick-switch).
     #[serde(default)]
     pub recent_dirs: Vec<PathBuf>,
+    /// Whether user has completed initial onboarding wizard. Default false (triggers wizard on first run).
+    #[serde(default)]
+    pub initialized: bool,
 }
 
 /// Default preferred port.
@@ -76,6 +79,7 @@ impl Default for AppState {
             autostart: false,
             lock_port: false,
             recent_dirs: Vec::new(),
+            initialized: false,
         }
     }
 }

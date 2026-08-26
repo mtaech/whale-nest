@@ -7,14 +7,107 @@
     <title>WhaleNest</title>
   </head>
   <body>
+    <header id="titlebar" data-tauri-drag-region>
+      <div class="titlebar-brand" data-tauri-drag-region>
+        <img class="titlebar-logo" src="/whalenest-mark.png" alt="" draggable="false" />
+        <span class="titlebar-title">WhaleNest</span>
+        <span id="tb-status" class="titlebar-status" aria-hidden="true"></span>
+      </div>
+      <div class="titlebar-controls">
+        <button id="btn-min" class="tb-btn" type="button" title="最小化" aria-label="最小化">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12.5 H19" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" /></svg>
+        </button>
+        <button id="btn-max" class="tb-btn" type="button" title="最大化" aria-label="最大化">
+          <svg class="icon-max" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="5" y="6" width="14" height="12" rx="1.5" stroke="currentColor" stroke-width="1.5" /></svg>
+          <svg class="icon-restore" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M9.5 8 V6.5 A1.5 1.5 0 0 1 11 5 H17.5 A1.5 1.5 0 0 1 19 6.5 V13 A1.5 1.5 0 0 1 17.5 14.5 H16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+            <rect x="5" y="8.5" width="11" height="10.5" rx="1.5" stroke="currentColor" stroke-width="1.5" />
+          </svg>
+        </button>
+        <button id="btn-close" class="tb-btn tb-btn--close" type="button" title="关闭" aria-label="关闭">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6.5 6.5 L17.5 17.5 M17.5 6.5 L6.5 17.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" /></svg>
+        </button>
+      </div>
+    </header>
     <div id="app">
-      <main class="shell">
+      <main id="shell" class="shell">
 
         <!-- 更新提示（检测到新版本 dsh 时显示） -->
         <div id="update-banner" class="update-banner" hidden>
           <span id="update-banner-text" class="update-banner-text"></span>
           <button id="btn-update" class="btn ghost" type="button">立即更新</button>
         </div>
+
+        <!-- 首次初始化引导（Step 模式） -->
+        <section id="view-wizard" class="view view-wizard" data-view="wizard" hidden>
+          <!-- 步骤导航条 -->
+          <nav class="wizard-stepper" aria-label="初始化步骤">
+            <div id="step-nav-1" class="step-indicator is-active">
+              <span class="step-num">1</span>
+              <span class="step-label">环境检测与安装</span>
+            </div>
+            <div class="step-divider" aria-hidden="true"></div>
+            <div id="step-nav-2" class="step-indicator">
+              <span class="step-num">2</span>
+              <span class="step-label">精选插件推荐</span>
+            </div>
+          </nav>
+
+          <!-- Step 1: 环境检测 -->
+          <div id="wizard-step-1" class="wizard-pane">
+            <div class="wizard-header">
+              <h1 class="view-title">环境运行条件检测</h1>
+              <p class="view-sub">WhaleNest 运行需要 Node.js 及 DeepSeek Harness 内核工具链</p>
+            </div>
+
+            <!-- 检测项目列表 -->
+            <div id="env-check-list" class="env-check-list">
+              <!-- JS 动态渲染项 -->
+            </div>
+
+            <!-- dsh 未安装时的安装指引卡片 -->
+            <div id="dsh-guide-box" class="dsh-guide-box" hidden>
+              <div class="guide-box-header">
+                <div class="status-dot warning"></div>
+                <span class="guide-box-title">DeepSeek Harness (dsh) 尚未安装</span>
+              </div>
+              <p class="view-text">请通过 npm 全局安装 dsh，或点击下方一键安装：</p>
+              <div class="code-block">
+                <code>npm i -g @deepseek-ai/dsh</code>
+                <button id="btn-copy-wizard-cmd" class="btn ghost" type="button">复制</button>
+              </div>
+              <div class="guide-box-actions">
+                <button id="btn-wizard-install-dsh" class="btn primary" type="button">一键安装 dsh</button>
+                <button id="btn-wizard-recheck" class="btn ghost" type="button">重新检测</button>
+              </div>
+            </div>
+
+            <!-- Step 1 底部操作 -->
+            <div class="wizard-actions">
+              <button id="btn-step1-recheck" class="btn ghost" type="button">重新检测</button>
+              <button id="btn-step1-next" class="btn primary" type="button" disabled>下一步：配置插件</button>
+            </div>
+          </div>
+
+          <!-- Step 2: 插件推荐 -->
+          <div id="wizard-step-2" class="wizard-pane" hidden>
+            <div class="wizard-header">
+              <h1 class="view-title">推荐安装仓库插件</h1>
+              <p class="view-sub">为您的 dsh 桌面体验增添更多实用工具与质感主题</p>
+            </div>
+
+            <!-- 插件推荐卡片网格 -->
+            <div id="plugins-recommend-list" class="plugins-grid">
+              <!-- JS 动态渲染插件卡片 -->
+            </div>
+
+            <!-- Step 2 底部操作 -->
+            <div class="wizard-actions">
+              <button id="btn-step2-prev" class="btn ghost" type="button">上一步</button>
+              <button id="btn-step2-finish" class="btn primary" type="button">完成配置并进入</button>
+            </div>
+          </div>
+        </section>
 
         <!-- 加载中 -->
         <section id="view-loading" class="view" data-view="loading">
@@ -36,7 +129,7 @@
             <span class="progress-bar"></span>
           </div>
 
-          <p class="version">WHALENEST · v0.1.0</p>
+          <p class="version">WHALENEST · v0.1.1</p>
         </section>
 
         <!-- 错误 -->
@@ -53,7 +146,7 @@
           <button id="btn-restart" class="btn primary" type="button">重启内核</button>
         </section>
 
-        <!-- 引导（未检测到 dsh） -->
+        <!-- 引导（未检测到 dsh，备用兼容） -->
         <section id="view-guide" class="view" data-view="guide" hidden>
           <div class="status-icon" aria-hidden="true">
             <svg viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -78,6 +171,14 @@
         </section>
 
       </main>
+      <div id="view-host" class="host" hidden>
+        <iframe
+          id="dsh-frame"
+          title="DeepSeek Harness"
+          loading="eager"
+          allow="clipboard-read *; clipboard-write *; fullscreen *; autoplay *; camera *; microphone *; display-capture *; geolocation *"
+        ></iframe>
+      </div>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>

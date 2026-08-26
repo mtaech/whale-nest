@@ -1,6 +1,6 @@
 [package]
 name = "whalenest"
-version = "0.1.0"
+version = "0.1.1"
 description = "WhaleNest — a Tauri v2 desktop shell hosting the DeepSeek Harness (dsh) kernel"
 authors = ["whalenest contributors"]
 edition = "2021"
@@ -30,6 +30,8 @@ devtools = ["tauri/devtools"]
 # TrayIconBuilder requires it, and image-png/ico are needed to decode the tray
 # and window icons, so they are listed explicitly here.
 tauri = { version = "2", features = ["tray-icon", "image-png", "image-ico"] }
+parking_lot = "0.12"
+libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
