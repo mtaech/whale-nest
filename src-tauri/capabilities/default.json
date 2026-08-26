@@ -13,6 +13,12 @@
     "dialog:default",
     "opener:default",
     "clipboard-manager:default",
+    "clipboard-manager:allow-read-text",
+    "clipboard-manager:allow-write-text",
+    "clipboard-manager:allow-read-image",
+    "clipboard-manager:allow-write-image",
+    "clipboard-manager:allow-write-html",
+    "clipboard-manager:allow-clear",
     "notification:default",
     "global-shortcut:allow-register",
     "global-shortcut:allow-unregister"

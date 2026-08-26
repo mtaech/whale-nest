@@ -623,6 +623,37 @@ fn quit(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Read image from native OS clipboard, encode to PNG and return binary bytes
+#[tauri::command]
+fn read_clipboard_image_binary() -> Result<Option<Vec<u8>>, String> {
+    let mut clipboard = match arboard::Clipboard::new() {
+        Ok(c) => c,
+        Err(e) => return Err(format!("打开系统剪贴板失败: {e}")),
+    };
+    match clipboard.get_image() {
+        Ok(img) => {
+            let mut png_bytes = Vec::new();
+            let mut encoder = png::Encoder::new(
+                &mut png_bytes,
+                img.width as u32,
+                img.height as u32,
+            );
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder
+                .write_header()
+                .map_err(|e| format!("PNG 编码失败: {e}"))?;
+            writer
+                .write_image_data(&img.bytes)
+                .map_err(|e| format!("写入 PNG 数据失败: {e}"))?;
+            drop(writer);
+            Ok(Some(png_bytes))
+        }
+        Err(arboard::Error::ContentNotAvailable) => Ok(None),
+        Err(e) => Err(format!("读取剪贴板图片失败: {e}")),
+    }
+}
+
 // ── update checking ──────────────────────────────────────────────────────────
 
 /// Event payload for the "dsh-update" channel.
@@ -919,7 +950,8 @@ pub fn run() {
             get_recommended_plugins,
             install_plugin,
             complete_setup,
-            quit
+            quit,
+            read_clipboard_image_binary
         ])
         // Close = hide to tray; dsh keeps running in the background.
         .on_window_event(|window, event| {

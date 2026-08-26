@@ -29,7 +29,10 @@ devtools = ["tauri/devtools"]
 # 2.11.5: default = wry, compression, common-controls-v6, dynamic-acl, x11, dbus).
 # TrayIconBuilder requires it, and image-png/ico are needed to decode the tray
 # and window icons, so they are listed explicitly here.
-tauri = { version = "2", features = ["tray-icon", "image-png", "image-ico"] }
+tauri = { version = "2", features = ["tray-icon", "image-png", "image-ico", "image"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+arboard = "3"
+png = "0.17"
 parking_lot = "0.12"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
