@@ -26,6 +26,7 @@ interface ShellState extends KernelStatusPayload {
   cwd: string;
   autostart: boolean;
   initialized?: boolean;
+  is_attached?: boolean;
 }
 
 interface UpdatePayload {

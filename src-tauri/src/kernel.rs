@@ -418,6 +418,8 @@ pub struct Kernel {
     pub(crate) child: Option<Child>,
     /// Port actually handed to dsh (resolved at spawn time).
     pub(crate) current_port: Option<u16>,
+    /// Whether this kernel is attached to an externally running dsh process
+    pub is_attached: bool,
     pub(crate) ready_emitted: bool,
     pub(crate) timeout_emitted: bool,
     pub(crate) ready_deadline: Option<Instant>,
@@ -442,6 +444,7 @@ impl Kernel {
             exec_error,
             child: None,
             current_port: None,
+            is_attached: false,
             ready_emitted: false,
             timeout_emitted: false,
             ready_deadline: None,
@@ -449,6 +452,23 @@ impl Kernel {
             restarts: 0,
             last_exit_status: None,
         }
+    }
+
+    /// Attach to an existing running dsh process (external kernel).
+    pub fn attach_to_existing(&mut self, port: u16, url: String) {
+        self.is_attached = true;
+        self.current_port = Some(port);
+        self.state = KernelState::Ready {
+            url: url.clone(),
+            port,
+        };
+        self.ready_emitted = true;
+        self.timeout_emitted = false;
+        let mut w = self.log_writer.lock();
+        let _ = w.write_line(&format!(
+            "=== WhaleNest attached to existing dsh process at {} (external kernel) ===",
+            url
+        ));
     }
 
     pub fn dsh_available(&self) -> bool {
@@ -564,6 +584,12 @@ impl Kernel {
 
     /// Graceful-ish stop: kill the child and reap it. Called from restart/quit.
     pub fn kill(&mut self) -> Result<(), String> {
+        if self.is_attached {
+            let mut w = self.log_writer.lock();
+            let _ = w.write_line("=== WhaleNest detached from external dsh kernel (kernel left running) ===");
+            self.state = KernelState::Stopped;
+            return Ok(());
+        }
         if let Some(mut child) = self.child.take() {
             // Windows: the spawn chain is cmd /C <dsh.cmd> web --port N, and
             // dsh.cmd launches node.exe as its own child. child.kill() only
@@ -673,6 +699,11 @@ impl Kernel {
         s.push_str(&format!("dsh 可执行文件: {dsh}\n"));
         if let Some(err) = &self.exec_error {
             s.push_str(&format!("dsh 探测详情: {err}\n"));
+        }
+        if self.is_attached {
+            s.push_str("运行模式: 对接现有 dsh 进程 (外部内核 - 重启/退出保护生效)\n");
+        } else {
+            s.push_str("运行模式: 独立托管内核 (子进程)\n");
         }
         s.push_str(&format!("内核状态: {:?}\n", self.state));
         s.push_str(&format!("profile: {}\n", self.config.profile));
@@ -846,4 +877,59 @@ fn read_log_tail(path: &Path, n: usize) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let start = lines.len().saturating_sub(n);
     lines[start..].join("\n")
+}
+
+/// Probe a specific port to check if an active DeepSeek Harness (dsh) web server is running.
+pub fn probe_dsh_at_port(port: u16) -> Option<String> {
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::Duration;
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(300)).ok()?;
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(600)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(300)));
+
+    let req = format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+    stream.write_all(req.as_bytes()).ok()?;
+
+    let mut buf = [0u8; 4096];
+    let n = stream.read(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf[..n]);
+
+    if text.contains("HTTP/1.1 200") || text.contains("HTTP/1.0 200") || text.contains("HTTP/1.1 304") {
+        let lower = text.to_ascii_lowercase();
+        if lower.contains("__moduleloader__")
+            || lower.contains("__dsh_boot__")
+            || lower.contains("deepseek")
+            || lower.contains("dsh")
+            || (lower.contains("content-type: text/html") && lower.contains("<!doctype html>"))
+        {
+            return Some(format!("http://127.0.0.1:{port}"));
+        }
+    }
+    None
+}
+
+/// Detect if any existing dsh server is already running on candidate ports.
+/// Priority: preferred_port first, then standard range [3080, 3081, 3082, 3083, 3084, 3085].
+pub fn detect_existing_dsh(preferred_port: Option<u16>) -> Option<(u16, String)> {
+    let mut candidate_ports = Vec::new();
+    if let Some(p) = preferred_port {
+        if p > 0 {
+            candidate_ports.push(p);
+        }
+    }
+    for p in [3080, 3081, 3082, 3083, 3084, 3085] {
+        if !candidate_ports.contains(&p) {
+            candidate_ports.push(p);
+        }
+    }
+
+    for port in candidate_ports {
+        if let Some(url) = probe_dsh_at_port(port) {
+            return Some((port, url));
+        }
+    }
+    None
 }

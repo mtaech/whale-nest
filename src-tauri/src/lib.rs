@@ -122,10 +122,43 @@ fn emit_and_reset_view(app: &AppHandle, status: KernelStatus) {
     }
 }
 
-/// Initial kernel launch (or guide state when dsh is missing).
+/// Initial kernel launch (detects existing dsh process first, or guides when missing).
 pub(crate) fn start_kernel(app: &AppHandle) {
     let managed = app.state::<Managed>();
     let mut kernel = managed.kernel.lock();
+
+    // 1. Detect if an existing dsh server is already running on localhost
+    let preferred = kernel.config.port;
+    if let Some((port, url)) = kernel::detect_existing_dsh(preferred) {
+        kernel.attach_to_existing(port, url.clone());
+        drop(kernel);
+
+        let app2 = app.clone();
+        let url2 = url.clone();
+        std::thread::spawn(move || {
+            notify(
+                &app2,
+                "WhaleNest 已对接现有 dsh 进程",
+                &format!("已连接至：{url2}（外部内核）"),
+            );
+        });
+
+        if let Some(window) = app.get_webview_window("main") {
+            if let Ok(target) = url.parse::<tauri::Url>() {
+                let _ = window.navigate(target);
+                let win = window.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(800)).await;
+                    let script = include_str!("../../src/desktop-bridge.js");
+                    let _ = win.eval(script);
+                });
+            }
+        }
+        emit_status(app, KernelStatus::Ready { url });
+        return;
+    }
+
+    // 2. Normal spawn flow when no active dsh server exists
     if !kernel.dsh_available() {
         drop(kernel);
         emit_status(app, KernelStatus::Guide);
@@ -149,14 +182,46 @@ pub(crate) fn start_kernel(app: &AppHandle) {
 }
 
 /// Restart the kernel (used by restart command, tray item, and dir switch).
-///
-/// Runs on the caller's thread only long enough to flip the UI into
-/// "starting" and hand the kill+spawn work to a background thread: the tray
-/// menu event callback lives on the app main thread, and `kill()` blocks on
-/// `taskkill` + `wait()` for the whole dsh process tree, which would freeze
-/// the UI (no animation, no response) for seconds.
 pub(crate) fn restart_kernel_impl(app: &AppHandle) {
     let managed = app.state::<Managed>();
+
+    // If currently attached to an external dsh process, restart must NOT kill the external process
+    {
+        let kernel = managed.kernel.lock();
+        if kernel.is_attached {
+            let url_opt = match &kernel.state {
+                KernelState::Ready { url, .. } => Some(url.clone()),
+                _ => None,
+            };
+            drop(kernel);
+
+            let app2 = app.clone();
+            std::thread::spawn(move || {
+                notify(
+                    &app2,
+                    "已对接现有 dsh 进程",
+                    "当前处于外部对接模式，无法重启外部内核。已刷新页面连接。",
+                );
+            });
+
+            if let Some(url) = url_opt {
+                if let Some(window) = app.get_webview_window("main") {
+                    if let Ok(target) = url.parse::<tauri::Url>() {
+                        let _ = window.navigate(target);
+                        let win = window.clone();
+                        tauri::async_runtime::spawn(async move {
+                            tokio::time::sleep(Duration::from_millis(800)).await;
+                            let script = include_str!("../../src/desktop-bridge.js");
+                            let _ = win.eval(script);
+                        });
+                    }
+                }
+                emit_status(app, KernelStatus::Ready { url });
+            }
+            return;
+        }
+    }
+
     // Re-resolve dsh on every restart attempt: the guide view's 重新检测 /
     // 一键安装 flows depend on picking up a newly installed dsh without an
     // app restart (Kernel::new resolved only once).
@@ -283,6 +348,7 @@ pub(crate) struct StateResponse {
     pub autostart: bool,
     pub lock_port: bool,
     pub initialized: bool,
+    pub is_attached: bool,
 }
 
 fn resolve_binary_path_helper(name: &str) -> Option<String> {
@@ -549,7 +615,13 @@ fn complete_setup(app: AppHandle, state: tauri::State<'_, Managed>) -> Result<()
 fn get_state(state: tauri::State<'_, Managed>) -> StateResponse {
     let cfg = state.config.lock();
     let kernel = state.kernel.lock();
-    let (status, url, message) = if !kernel.dsh_available() {
+    let is_attached = kernel.is_attached;
+    let (status, url, message) = if is_attached {
+        match &kernel.state {
+            KernelState::Ready { url, .. } => ("ready".to_string(), Some(url.clone()), None),
+            _ => ("starting".to_string(), None, None),
+        }
+    } else if !kernel.dsh_available() {
         ("guide".to_string(), None, None)
     } else {
         match &kernel.state {
@@ -568,6 +640,7 @@ fn get_state(state: tauri::State<'_, Managed>) -> StateResponse {
         autostart: cfg.autostart,
         lock_port: cfg.lock_port,
         initialized: cfg.initialized,
+        is_attached,
     }
 }
 
@@ -912,6 +985,10 @@ fn spawn_kernel_watcher(
         let mut exited = None;
         {
             let mut k = kernel.lock();
+            if k.is_attached {
+                // Attached to external dsh process: no child process to supervise
+                continue;
+            }
             if let Some(child) = k.child.as_mut() {
                 if let Ok(Some(status)) = child.try_wait() {
                     exited = Some(status);
@@ -1051,14 +1128,6 @@ pub fn run() {
     }
 
     tauri::Builder::default()
-        // Single instance: a second launch focuses the existing main window.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.unminimize();
-                let _ = window.set_focus();
-            }
-        }))
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             // Pass --silent when launched via autostart so the window can be

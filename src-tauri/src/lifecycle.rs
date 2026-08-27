@@ -258,6 +258,8 @@ pub fn exit_app(app: &AppHandle) {
         .shutting_down
         .store(true, std::sync::atomic::Ordering::Release);
     let mut kernel = managed.kernel.lock();
-    let _ = kernel.kill();
+    if !kernel.is_attached {
+        let _ = kernel.kill();
+    }
     app.exit(0);
 }
