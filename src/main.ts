@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./styles.css";
-import "./debug-hud.js";
+import "./desktop-bridge.js";
 
 /**
  * WhaleNest 桌面薄壳页（支持首次 Step 向导模式）

@@ -33,7 +33,7 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<()> {
     let inject_hud = MenuItem::with_id(
         app,
         "inject-debug-hud",
-        "📋 注入剪贴板排查器",
+        "📋 注入增强桥接脚本",
         true,
         None::<&str>,
     )?;
@@ -180,7 +180,7 @@ pub fn handle_tray_event(app: &AppHandle, id: &str) -> Result<(), String> {
         }
         "inject-debug-hud" => {
             if let Some(window) = app.get_webview_window("main") {
-                let script = include_str!("../../src/debug-hud.js");
+                let script = include_str!("../../src/desktop-bridge.js");
                 let _ = window.eval(script);
                 let _ = window.show();
                 let _ = window.set_focus();
