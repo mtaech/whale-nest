@@ -10,6 +10,8 @@
     "core:window:allow-maximize",
     "core:window:allow-toggle-maximize",
     "core:window:allow-close",
+    "core:window:allow-unmaximize",
+    "core:window:allow-start-resize-dragging",
     "dialog:default",
     "opener:default",
     "clipboard-manager:default",

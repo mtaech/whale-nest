@@ -1,6 +1,6 @@
 [package]
 name = "whalenest"
-version = "0.1.1"
+version = "0.1.2"
 description = "WhaleNest — a Tauri v2 desktop shell hosting the DeepSeek Harness (dsh) kernel"
 authors = ["whalenest contributors"]
 edition = "2021"
@@ -23,6 +23,11 @@ tauri-build = { version = "2", features = [] }
 # this list / build without --features devtools to harden a production release.
 default = ["devtools"]
 devtools = ["tauri/devtools"]
+# `tauri build` 会带上 --features custom-protocol。缺这条声明时：cargo 直接报
+# "does not contain this feature"；而绕过 CLI 用 `cargo build --release` 产出的包，
+# 会因为 tauri::is_dev() == !cfg!(feature = "custom-protocol") 被判成 dev 模式，
+# 转去连 devUrl(http://localhost:1420) —— 表现就是 Connection refused。
+custom-protocol = ["tauri/custom-protocol"]
 
 [dependencies]
 # NOTE: tauri 2.x default features do NOT include "tray-icon" (verified against
@@ -30,7 +35,8 @@ devtools = ["tauri/devtools"]
 # TrayIconBuilder requires it, and image-png/ico are needed to decode the tray
 # and window icons, so they are listed explicitly here.
 tauri = { version = "2", features = ["tray-icon", "image-png", "image-ico", "image"] }
-image = { version = "0.25", default-features = false, features = ["png"] }
+# image crate 曾用于 save_dropped_image 解析拖入图片的宽高；拖放已交回 dsh 原生
+# 处理，这里不再需要。剪贴板兜底只做 RGBA→PNG 编码，用 png crate 即可。
 arboard = "3"
 png = "0.17"
 parking_lot = "0.12"

@@ -163,7 +163,17 @@ function render(payload: ShellState | KernelStatusPayload): void {
   switch (payload.status) {
     case "ready":
       if (payload.url) {
-        window.location.replace(payload.url);
+        if (dshFrame && hostEl) {
+          if (dshFrame.src !== payload.url) {
+            dshFrame.src = payload.url;
+          }
+          if (shellEl) {
+            shellEl.hidden = true;
+          }
+          hostEl.hidden = false;
+        } else {
+          window.location.href = payload.url;
+        }
       } else {
         renderError("内核已就绪，但缺少访问地址");
       }
@@ -398,7 +408,87 @@ function renderUpdate(payload: UpdatePayload): void {
   }
 }
 
+/**
+ * iframe 子帧 IPC 中继
+ *
+ * dsh 页面在 iframe 里属于「远程源」(http://127.0.0.1:<port>)，Tauri v2 的 ACL
+ * 不会放行远程源直接调用自定义命令。desktop-bridge.js 在子帧里改用
+ * postMessage 把请求发上来，这里由壳页（本地源）代为 invoke 并回传结果。
+ *
+ * 只接受来自宿主 iframe 的消息，且命令必须在白名单内。
+ */
+// 无边框窗口缩放方向映射（对应 index.html 里的 data-resize 热区）
+type ResizeDir =
+  | "North"
+  | "South"
+  | "West"
+  | "East"
+  | "NorthWest"
+  | "NorthEast"
+  | "SouthWest"
+  | "SouthEast";
+
+const RESIZE_DIRECTIONS: Record<string, ResizeDir> = {
+  n: "North",
+  s: "South",
+  w: "West",
+  e: "East",
+  nw: "NorthWest",
+  ne: "NorthEast",
+  sw: "SouthWest",
+  se: "SouthEast",
+};
+
+const RELAY_TAG = "whalenest-ipc";
+
+const RELAY_ALLOWED_COMMANDS = new Set([
+  "open_external_url",
+  // clipboardData 为空时（Windows CF_DIB 截图）的兜底取字节。图片本身仍由 dsh
+  // 自己收进附件库，我们不再落地任何文件。
+  "read_clipboard_image_binary",
+]);
+
+function setupIpcRelay(): void {
+  window.addEventListener("message", (event: MessageEvent) => {
+    const data = event.data as
+      | { tag?: string; kind?: string; id?: string; cmd?: string; args?: unknown }
+      | null;
+    if (!data || data.tag !== RELAY_TAG || data.kind !== "request") return;
+
+    // 只信任宿主 iframe 发来的消息
+    const source = event.source;
+    if (!dshFrame || !source || source !== dshFrame.contentWindow) return;
+
+    const { id, cmd, args } = data;
+    if (typeof id !== "string" || typeof cmd !== "string") return;
+
+    const reply = (payload: Record<string, unknown>): void => {
+      dshFrame.contentWindow?.postMessage(
+        { tag: RELAY_TAG, kind: "response", id, ...payload },
+        "*",
+      );
+    };
+
+    if (!RELAY_ALLOWED_COMMANDS.has(cmd)) {
+      reply({ ok: false, error: `命令未被允许中继: ${cmd}` });
+      return;
+    }
+
+    void invoke(cmd, (args ?? {}) as Record<string, unknown>)
+      .then((result) => {
+        reply({ ok: true, result });
+      })
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        reply({ ok: false, error: message });
+      });
+  });
+}
+
 async function init(): Promise<void> {
+  // iframe 子帧 IPC 中继（剪贴板图片、外链直开等命令）
+  setupIpcRelay();
+
   // 基础按钮事件
   btnRestart?.addEventListener("click", () => {
     void invoke("restart_kernel");
@@ -503,6 +593,17 @@ async function init(): Promise<void> {
   btnClose?.addEventListener("click", () => {
     void win.close();
   });
+
+  // 无边框窗口：自绘缩放热区（原生边框关闭后没有系统 resize grip）
+  for (const edge of document.querySelectorAll<HTMLElement>("[data-resize]")) {
+    edge.addEventListener("mousedown", (event) => {
+      if (event.button !== 0) return;
+      const dir = edge.dataset.resize;
+      if (!dir) return;
+      event.preventDefault();
+      void win.startResizeDragging(RESIZE_DIRECTIONS[dir]);
+    });
+  }
 
   titlebarEl?.addEventListener("dblclick", (event) => {
     if (

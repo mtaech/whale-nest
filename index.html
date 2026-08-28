@@ -129,7 +129,7 @@
             <span class="progress-bar"></span>
           </div>
 
-          <p class="version">WHALENEST · v0.1.1</p>
+          <p class="version">WHALENEST · v0.1.2</p>
         </section>
 
         <!-- 错误 -->
@@ -179,6 +179,17 @@
           allow="clipboard-read *; clipboard-write *; fullscreen *; autoplay *; camera *; microphone *; display-capture *; geolocation *"
         ></iframe>
       </div>
+    </div>
+    <!-- 无边框窗口的缩放热区（原生边框已关闭，需自绘拖拽边） -->
+    <div class="resize-edges" aria-hidden="true">
+      <div class="rz rz-n" data-resize="n"></div>
+      <div class="rz rz-s" data-resize="s"></div>
+      <div class="rz rz-w" data-resize="w"></div>
+      <div class="rz rz-e" data-resize="e"></div>
+      <div class="rz rz-nw" data-resize="nw"></div>
+      <div class="rz rz-ne" data-resize="ne"></div>
+      <div class="rz rz-sw" data-resize="sw"></div>
+      <div class="rz rz-se" data-resize="se"></div>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>

@@ -411,6 +411,10 @@ pub struct Kernel {
     pub state: KernelState,
     log_path: PathBuf,
     log_writer: Arc<Mutex<LogWriter>>,
+    /// The authenticated dsh web URL captured from the `dsh web:` startup line
+    /// (carrying the per-process launch token), when the managed dsh kernel has
+    /// printed one. Written by the log readers, read by the readiness loop.
+    pub(crate) auth_url: Arc<Mutex<Option<String>>>,
     exec: Option<DshExec>,
     /// Why detection failed (DshNotFound reason), for diagnostics; None when
     /// dsh is available or detection has not run.
@@ -440,6 +444,7 @@ impl Kernel {
             state: KernelState::Stopped,
             log_path,
             log_writer,
+            auth_url: Arc::new(Mutex::new(None)),
             exec,
             exec_error,
             child: None,
@@ -496,6 +501,12 @@ impl Kernel {
 
     pub fn log_path(&self) -> &Path {
         &self.log_path
+    }
+
+    /// The authenticated dsh web URL (with launch token) captured from dsh's
+    /// startup line, if one has been announced for the current process.
+    pub fn auth_url(&self) -> Option<String> {
+        self.auth_url.lock().clone()
     }
 
     /// Current port actually bound (None while not starting).
@@ -560,11 +571,15 @@ impl Kernel {
             .map_err(|e| format!("spawn dsh 失败: {e}"))?;
 
         let writer = self.log_writer.clone();
+        let auth_url = self.auth_url.clone();
+        // Reset the captured URL on every spawn: a restart mints a fresh
+        // launch token, so a stale authenticated URL must not be reused.
+        *auth_url.lock() = None;
         if let Some(out) = child.stdout.take() {
-            spawn_log_reader(out, writer.clone(), "stdout");
+            spawn_log_reader(out, writer.clone(), auth_url.clone(), "stdout");
         }
         if let Some(err) = child.stderr.take() {
-            spawn_log_reader(err, writer.clone(), "stderr");
+            spawn_log_reader(err, writer.clone(), auth_url.clone(), "stderr");
         }
         let mut w = self.log_writer.lock();
         let _ = w.write_line(&format!(
@@ -586,7 +601,9 @@ impl Kernel {
     pub fn kill(&mut self) -> Result<(), String> {
         if self.is_attached {
             let mut w = self.log_writer.lock();
-            let _ = w.write_line("=== WhaleNest detached from external dsh kernel (kernel left running) ===");
+            let _ = w.write_line(
+                "=== WhaleNest detached from external dsh kernel (kernel left running) ===",
+            );
             self.state = KernelState::Stopped;
             return Ok(());
         }
@@ -845,9 +862,13 @@ fn build_unix_command(exec: &DshExec, port: &str) -> Command {
 }
 
 /// Stream a child pipe (stdout/stderr) into the shared rolling log.
+/// When a line carries dsh's own `dsh web: <url>` announcement, the
+/// authenticated URL (with its per-process launch token) is captured into
+/// `auth_url` so the readiness loop can emit the token-bearing Ready URL.
 fn spawn_log_reader<R: Read + Send + 'static>(
     reader: R,
     writer: Arc<Mutex<LogWriter>>,
+    auth_url: Arc<Mutex<Option<String>>>,
     tag: &'static str,
 ) {
     std::thread::spawn(move || {
@@ -860,6 +881,13 @@ fn spawn_log_reader<R: Read + Send + 'static>(
                 Ok(_) => {
                     let trimmed = line.trim_end();
                     if !trimmed.is_empty() {
+                        // Capture dsh's own startup URL line. It always embeds
+                        // the process launch token, which the WebView needs to
+                        // authenticate on first load. Note the `dsh web:` prefix
+                        // is printed even with `--no-open` (printUrl defaults on).
+                        if let Some(url) = extract_dsh_web_url(trimmed) {
+                            *auth_url.lock() = Some(url);
+                        }
                         let mut w = writer.lock();
                         let _ = w.write_line(&format!("[{tag}] {trimmed}"));
                     }
@@ -867,6 +895,21 @@ fn spawn_log_reader<R: Read + Send + 'static>(
             }
         }
     });
+}
+
+/// Pull the authenticated dsh web URL out of a `dsh web: http://…?token=…`
+/// startup line. Returns `None` for any other line (or a parenthesised LAN
+/// suffix, which is intentionally ignored: the loopback URL is the one the
+/// local WebView must use).
+fn extract_dsh_web_url(line: &str) -> Option<String> {
+    let idx = line.find("dsh web:")?;
+    let rest = &line[idx + "dsh web:".len()..];
+    let url = rest.trim().split_whitespace().next()?;
+    if url.starts_with("http://") || url.starts_with("https://") {
+        Some(url.to_string())
+    } else {
+        None
+    }
 }
 
 fn read_log_tail(path: &Path, n: usize) -> String {
@@ -897,7 +940,10 @@ pub fn probe_dsh_at_port(port: u16) -> Option<String> {
     let n = stream.read(&mut buf).ok()?;
     let text = String::from_utf8_lossy(&buf[..n]);
 
-    if text.contains("HTTP/1.1 200") || text.contains("HTTP/1.0 200") || text.contains("HTTP/1.1 304") {
+    if text.contains("HTTP/1.1 200")
+        || text.contains("HTTP/1.0 200")
+        || text.contains("HTTP/1.1 304")
+    {
         let lower = text.to_ascii_lowercase();
         if lower.contains("__moduleloader__")
             || lower.contains("__dsh_boot__")
@@ -932,4 +978,41 @@ pub fn detect_existing_dsh(preferred_port: Option<u16>) -> Option<(u16, String)>
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_plain_loopback_url() {
+        let line = "dsh web: http://127.0.0.1:3987/?token=abcDEF123_-";
+        assert_eq!(
+            extract_dsh_web_url(line).as_deref(),
+            Some("http://127.0.0.1:3987/?token=abcDEF123_-")
+        );
+    }
+
+    #[test]
+    fn extracts_url_from_line_with_lan_suffix() {
+        let line =
+            "dsh web: http://127.0.0.1:3080/?token=xyz (LAN: http://192.168.1.5:3080/?token=xyz)";
+        assert_eq!(
+            extract_dsh_web_url(line).as_deref(),
+            Some("http://127.0.0.1:3080/?token=xyz")
+        );
+    }
+
+    #[test]
+    fn ignores_other_lines() {
+        assert_eq!(extract_dsh_web_url("=== dsh kernel start ==="), None);
+        assert_eq!(extract_dsh_web_url("some unrelated stdout line"), None);
+        assert_eq!(extract_dsh_web_url(""), None);
+    }
+
+    #[test]
+    fn ignores_malformed_or_unknown_scheme() {
+        assert_eq!(extract_dsh_web_url("dsh web: ftp://127.0.0.1/x"), None);
+        assert_eq!(extract_dsh_web_url("dsh web:"), None);
+    }
 }

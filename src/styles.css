@@ -683,7 +683,10 @@ body {
 }
 
 .titlebar-controls {
-  display: none;
+  display: flex;
+  align-items: center;
+  height: 100%;
+  align-self: stretch;
 }
 
 .tb-btn {
@@ -745,3 +748,56 @@ body {
   transform: translateZ(0);
   will-change: transform;
 }
+
+/* ── 无边框窗口缩放热区 ─────────────────────── */
+
+.resize-edges {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  pointer-events: none;
+}
+
+body.is-maximized .resize-edges {
+  display: none;
+}
+
+.rz {
+  position: absolute;
+  pointer-events: auto;
+}
+
+.rz-n,
+.rz-s {
+  left: 6px;
+  right: 6px;
+  height: 4px;
+  cursor: ns-resize;
+}
+
+.rz-n { top: 0; }
+.rz-s { bottom: 0; }
+
+.rz-w,
+.rz-e {
+  top: 6px;
+  bottom: 6px;
+  width: 4px;
+  cursor: ew-resize;
+}
+
+.rz-w { left: 0; }
+.rz-e { right: 0; }
+
+.rz-nw,
+.rz-ne,
+.rz-sw,
+.rz-se {
+  width: 8px;
+  height: 8px;
+}
+
+.rz-nw { top: 0; left: 0; cursor: nwse-resize; }
+.rz-ne { top: 0; right: 0; cursor: nesw-resize; }
+.rz-sw { bottom: 0; left: 0; cursor: nesw-resize; }
+.rz-se { bottom: 0; right: 0; cursor: nwse-resize; }

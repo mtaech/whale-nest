@@ -143,17 +143,6 @@ pub(crate) fn start_kernel(app: &AppHandle) {
             );
         });
 
-        if let Some(window) = app.get_webview_window("main") {
-            if let Ok(target) = url.parse::<tauri::Url>() {
-                let _ = window.navigate(target);
-                let win = window.clone();
-                tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(Duration::from_millis(800)).await;
-                    let script = include_str!("../../src/desktop-bridge.js");
-                    let _ = win.eval(script);
-                });
-            }
-        }
         emit_status(app, KernelStatus::Ready { url });
         return;
     }
@@ -205,17 +194,6 @@ pub(crate) fn restart_kernel_impl(app: &AppHandle) {
             });
 
             if let Some(url) = url_opt {
-                if let Some(window) = app.get_webview_window("main") {
-                    if let Ok(target) = url.parse::<tauri::Url>() {
-                        let _ = window.navigate(target);
-                        let win = window.clone();
-                        tauri::async_runtime::spawn(async move {
-                            tokio::time::sleep(Duration::from_millis(800)).await;
-                            let script = include_str!("../../src/desktop-bridge.js");
-                            let _ = win.eval(script);
-                        });
-                    }
-                }
                 emit_status(app, KernelStatus::Ready { url });
             }
             return;
@@ -696,17 +674,6 @@ fn quit(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-#[derive(Clone, Serialize)]
-pub struct SavedImageResult {
-    pub success: bool,
-    pub relative_path: String,
-    pub absolute_path: String,
-    pub file_name: String,
-    pub width: u32,
-    pub height: u32,
-    pub size_bytes: usize,
-}
-
 #[tauri::command]
 fn open_external_url(url: String) -> Result<(), String> {
     let trimmed = url.trim();
@@ -720,117 +687,6 @@ fn open_external_url(url: String) -> Result<(), String> {
     }
 }
 
-#[tauri::command]
-fn open_attachment_folder(app: AppHandle, relative_path: String) -> Result<(), String> {
-    let managed = app.state::<Managed>();
-    let cwd = managed.config.lock().cwd.clone();
-    let clean_rel = relative_path.trim().trim_start_matches('@');
-    let full_path = cwd.join(clean_rel);
-    if let Some(parent) = full_path.parent() {
-        tauri_plugin_opener::open_path(parent, None::<&str>).map_err(|e| e.to_string())
-    } else {
-        tauri_plugin_opener::open_path(full_path, None::<&str>).map_err(|e| e.to_string())
-    }
-}
-
-#[tauri::command]
-fn save_clipboard_image(app: AppHandle) -> Result<Option<SavedImageResult>, String> {
-    let mut clipboard = match arboard::Clipboard::new() {
-        Ok(c) => c,
-        Err(e) => return Err(format!("打开系统剪贴板失败: {e}")),
-    };
-    match clipboard.get_image() {
-        Ok(img) => {
-            let width = img.width as u32;
-            let height = img.height as u32;
-            let mut png_bytes = Vec::new();
-            let mut encoder = png::Encoder::new(&mut png_bytes, width, height);
-            encoder.set_color(png::ColorType::Rgba);
-            encoder.set_depth(png::BitDepth::Eight);
-            let mut writer = encoder
-                .write_header()
-                .map_err(|e| format!("PNG 编码头失败: {e}"))?;
-            writer
-                .write_image_data(&img.bytes)
-                .map_err(|e| format!("写入 PNG 数据失败: {e}"))?;
-            drop(writer);
-
-            save_image_to_workspace(&app, png_bytes, width, height, None)
-        }
-        Err(arboard::Error::ContentNotAvailable) => Ok(None),
-        Err(e) => Err(format!("读取剪贴板图片失败: {e}")),
-    }
-}
-
-#[tauri::command]
-fn save_dropped_image(
-    app: AppHandle,
-    file_name: Option<String>,
-    png_bytes: Vec<u8>,
-) -> Result<SavedImageResult, String> {
-    let (width, height) = match image::load_from_memory(&png_bytes) {
-        Ok(dyn_img) => (dyn_img.width(), dyn_img.height()),
-        Err(_) => (0, 0),
-    };
-    match save_image_to_workspace(&app, png_bytes, width, height, file_name)? {
-        Some(res) => Ok(res),
-        None => Err("保存图片失败".into()),
-    }
-}
-
-fn save_image_to_workspace(
-    app: &AppHandle,
-    bytes: Vec<u8>,
-    width: u32,
-    height: u32,
-    suggested_name: Option<String>,
-) -> Result<Option<SavedImageResult>, String> {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let managed = app.state::<Managed>();
-    let cwd = managed.config.lock().cwd.clone();
-    let attach_dir = cwd.join(".dsh").join("attachments");
-    std::fs::create_dir_all(&attach_dir).map_err(|e| format!("创建附件目录失败: {e}"))?;
-
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-
-    let ext = suggested_name
-        .as_deref()
-        .and_then(|n| std::path::Path::new(n).extension().and_then(|e| e.to_str()))
-        .map(|e| format!(".{}", e.to_lowercase()))
-        .unwrap_or_else(|| ".png".to_string());
-
-    let base_stem = suggested_name
-        .as_deref()
-        .and_then(|n| std::path::Path::new(n).file_stem().and_then(|s| s.to_str()))
-        .unwrap_or("image");
-
-    let clean_stem: String = base_stem
-        .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-        .collect();
-
-    let final_name = format!("{}_{}{}", clean_stem, ts % 1000000, ext);
-    let target_path = attach_dir.join(&final_name);
-    std::fs::write(&target_path, &bytes).map_err(|e| format!("写入图片文件失败: {e}"))?;
-
-    let relative_path = format!("@.dsh/attachments/{}", final_name);
-    let absolute_path = target_path.to_string_lossy().to_string();
-
-    Ok(Some(SavedImageResult {
-        success: true,
-        relative_path,
-        absolute_path,
-        file_name: final_name,
-        width,
-        height,
-        size_bytes: bytes.len(),
-    }))
-}
-
 /// Read image from native OS clipboard, encode to PNG and return binary bytes
 #[tauri::command]
 fn read_clipboard_image_binary() -> Result<Option<Vec<u8>>, String> {
@@ -841,11 +697,8 @@ fn read_clipboard_image_binary() -> Result<Option<Vec<u8>>, String> {
     match clipboard.get_image() {
         Ok(img) => {
             let mut png_bytes = Vec::new();
-            let mut encoder = png::Encoder::new(
-                &mut png_bytes,
-                img.width as u32,
-                img.height as u32,
-            );
+            let mut encoder =
+                png::Encoder::new(&mut png_bytes, img.width as u32, img.height as u32);
             encoder.set_color(png::ColorType::Rgba);
             encoder.set_depth(png::BitDepth::Eight);
             let mut writer = encoder
@@ -1041,9 +894,36 @@ fn spawn_readiness(app: AppHandle, kernel: Arc<Mutex<Kernel>>) {
             let Some(timeout) = timeout else { continue };
 
             let base_url = format!("http://127.0.0.1:{port}");
-            let readiness = Readiness::new(base_url);
+            let readiness = Readiness::new(base_url.clone());
             match readiness.wait_until_ready(timeout).await {
-                Ok(url) => {
+                Ok(_) => {
+                    // Wait for dsh's authenticated URL line. dsh mints a
+                    // per-process launch token and announces it in the
+                    // `dsh web: http://…?token=…` line; the WebView needs that
+                    // token to request index.html (a bare `/` gets 401). In the
+                    // vanishingly rare case the line never arrives before the
+                    // deadline, emit the raw URL so the UI still shows an
+                    // address and the 401-aside surfaces in the log.
+                    let auth_url = {
+                        let k = kernel.lock();
+                        if k.ready_emitted || k.current_port != Some(port) {
+                            continue;
+                        }
+                        match k.auth_url() {
+                            Some(url) => Some(url),
+                            // Still within the readiness window: keep polling for
+                            // the token line before giving up. Once the deadline
+                            // passes the loop below falls back to the raw URL.
+                            None if k.remaining_ready_timeout().is_some_and(|d| !d.is_zero()) => {
+                                continue
+                            }
+                            None => None,
+                        }
+                    };
+                    let url = match auth_url {
+                        Some(url) => url,
+                        None => base_url.clone(),
+                    };
                     let mut k = kernel.lock();
                     if k.ready_emitted || k.current_port != Some(port) {
                         continue;
@@ -1063,17 +943,6 @@ fn spawn_readiness(app: AppHandle, kernel: Arc<Mutex<Kernel>>) {
                         let _ = std::thread::spawn(move || {
                             notify(&app2, "dsh 内核已就绪", &format!("访问地址：{url2}"));
                         });
-                    }
-                    if let Some(window) = app.get_webview_window("main") {
-                        if let Ok(target) = url.parse::<tauri::Url>() {
-                            let _ = window.navigate(target);
-                            let win = window.clone();
-                            tauri::async_runtime::spawn(async move {
-                                tokio::time::sleep(Duration::from_millis(800)).await;
-                                let script = include_str!("../../src/desktop-bridge.js");
-                                let _ = win.eval(script);
-                            });
-                        }
                     }
                     emit_status(&app, KernelStatus::Ready { url });
                 }
@@ -1156,9 +1025,6 @@ pub fn run() {
             complete_setup,
             quit,
             open_external_url,
-            open_attachment_folder,
-            save_clipboard_image,
-            save_dropped_image,
             read_clipboard_image_binary
         ])
         // Close = hide to tray; dsh keeps running in the background.
@@ -1169,35 +1035,35 @@ pub fn run() {
         })
         .setup(|app| {
             // 0. create main window programmatically with full clipboard, link delegation & drag-drop capabilities
-            let _window = tauri::WebviewWindowBuilder::new(
-                app,
-                "main",
-                tauri::WebviewUrl::default(),
-            )
-            .title("WhaleNest")
-            .inner_size(1280.0, 960.0)
-            .min_inner_size(900.0, 600.0)
-            .decorations(true)
-            .transparent(false)
-            .disable_drag_drop_handler()
-            .enable_clipboard_access()
-            .initialization_script(include_str!("../../src/desktop-bridge.js"))
-            .on_navigation(|url| {
-                let scheme = url.scheme();
-                let host = url.host_str().unwrap_or("");
-                if scheme == "tauri" || scheme == "asset" || scheme == "about" {
-                    return true;
-                }
-                if (scheme == "http" || scheme == "https")
-                    && (host == "127.0.0.1" || host == "localhost")
-                {
-                    return true;
-                }
-                let url_str = url.to_string();
-                let _ = tauri_plugin_opener::open_url(&url_str, None::<&str>);
-                false
-            })
-            .build()?;
+            let _window =
+                tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
+                    .title("WhaleNest")
+                    .inner_size(1280.0, 960.0)
+                    .min_inner_size(900.0, 600.0)
+                    .decorations(false)
+                    .transparent(false)
+                    .disable_drag_drop_handler()
+                    .enable_clipboard_access()
+                    // 注入到「所有帧」：壳页自身 + 承载 dsh 的 iframe 子帧都需要桥接
+                    .initialization_script_for_all_frames(include_str!(
+                        "../../src/desktop-bridge.js"
+                    ))
+                    .on_navigation(|url| {
+                        let scheme = url.scheme();
+                        let host = url.host_str().unwrap_or("");
+                        if scheme == "tauri" || scheme == "asset" || scheme == "about" {
+                            return true;
+                        }
+                        if (scheme == "http" || scheme == "https")
+                            && (host == "127.0.0.1" || host == "localhost")
+                        {
+                            return true;
+                        }
+                        let url_str = url.to_string();
+                        let _ = tauri_plugin_opener::open_url(&url_str, None::<&str>);
+                        false
+                    })
+                    .build()?;
 
             // 1. config dir + persisted state
             let config_dir = state::init_config_dir(app.handle());
