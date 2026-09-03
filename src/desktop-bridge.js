@@ -4,9 +4,9 @@
  * 桌面端只补 WebView 缺的那一块，不碰 dsh 自己能做好的事：
  *
  * 1. 外链拦截：非本地链接与 window.open 交给系统默认浏览器。
- * 2. 剪贴板图片兜底：仅当 clipboardData 里既没有图片也没有文本时（Windows
- *    截图走 CF_DIB，标准 paste 事件为空），才用原生剪贴板取字节，合成一个
- * 正常的 paste 事件派发给输入框。
+ * 2. 剪贴板图片兜底：仅当 clipboardData 完全为空时（Windows 截图走 CF_DIB；
+ *    Linux WebKitGTK 对纯图片剪贴板同样给空 DataTransfer），才用原生剪贴板
+ *    取字节，合成一个正常的 paste 事件派发给输入框。
  *
  * 刻意不做的事：
  * - 不拦截「clipboardData 里已有图片」的粘贴 —— dsh 前端自己就会把它收进
@@ -149,16 +149,26 @@
 
   // ── 2. 剪贴板图片兜底（仅补 clipboardData 为空的平台缺陷） ──────────────────
   //
-  // Windows 截图工具常只放 CF_DIB，WebView2 的标准 paste 事件里 items 为空，
-  // dsh 的 onPaste 拿不到任何 File。这时才由原生 arboard 取 PNG 字节，合成
+  // Windows 截图工具常只放 CF_DIB，WebView2 的标准 paste 事件里 items 为空；
+  // Linux WebKitGTK 对纯图片剪贴板也一样（types/items/files 全空）。这时 dsh
+  // 的 paste 路由拿不到任何 File，才由原生 arboard 取 PNG 字节，合成
   // DataTransfer 再派发一个真正的 paste 事件 —— 让 dsh 走它自己那条路，
   // 该出缩略图就出缩略图，附件也进它的内容寻址库，而不是我们另开一套账。
   let fallbackInFlight = false;
 
+  /**
+   * 定位 dsh 的输入框。dsh 0.1.2-alpha 起输入框是 Lexical contenteditable
+   * div（不再是 textarea），两种宿主都认：优先当前焦点元素，退回页面上
+   * 第一个可编辑元素。
+   */
   function findComposer() {
     const active = document.activeElement;
     if (active instanceof HTMLTextAreaElement && !active.disabled) return active;
-    return document.querySelector("textarea:not([disabled])");
+    if (active instanceof HTMLElement && active.isContentEditable) return active;
+    return (
+      document.querySelector("textarea:not([disabled])") ||
+      document.querySelector('[contenteditable="true"], [contenteditable="plaintext-only"]')
+    );
   }
 
   /** 把 PNG 字节包成 File，合成 paste 事件交给 dsh 的 onPaste。 */
@@ -197,11 +207,16 @@
     const text = cd ? cd.getData("text/plain") : "";
     if (text && text.trim().length > 0) return;
 
-    // 既无图片也无文本：可能是 CF_DIB 那类缺陷，问一次原生剪贴板。
-    // 注意这里不调 preventDefault —— 异步回调跑到时事件早已派发完，调了也
-    // 无效；而这个分支本就没有默认行为可拦（剪贴板里既没图也没文本）。
+    // 还带着其它类型（比如 text/html）→ 交给原生路径，只兜「完全空」的底。
+    if (types.length > 0) return;
+
+    // 完全空的 clipboardData：就是上面说的平台缺陷场景，问一次原生剪贴板。
+    // preventDefault 必须在事件派发期间同步调用才有效，而且这里必须调 ——
+    // WebKitGTK 的默认动作会把一张 blob: 裸 <img> 直接插进 contenteditable，
+    // 那张图不归 Lexical 管，纯属垃圾节点。
     const composer = findComposer();
     if (!composer) return;
+    e.preventDefault();
 
     fallbackInFlight = true;
     callTauri("read_clipboard_image_binary")
