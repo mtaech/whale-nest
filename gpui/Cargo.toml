@@ -1,0 +1,45 @@
+[package]
+name = "whalenest-gpui"
+version = "0.1.2"
+description = "WhaleNest — GPUI 桌面壳宿主 DeepSeek Harness (dsh) 内核（Tauri 版移植）"
+edition = "2021"
+license = "MIT"
+
+[[bin]]
+name = "whalenest"
+path = "src/main.rs"
+
+[dependencies]
+# gpui-kit 0.6：聚合 crate，一个依赖打包整个 GPUI 栈（含 gpui-pre / gpui-component /
+# gpui-kit-assets），默认 features 含 component + assets。
+gpui-kit = "0.6"
+
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+parking_lot = "0.12"
+libc = "0.2"
+flume = "0.11"
+arboard = "3"
+png = "0.17"
+open = "5"
+rfd = "0.15"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+ksni = "0.2"
+notify-rust = "4.11"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+tray-icon = "0.21"
+winreg = "0.55"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+tray-icon = "0.21"
+
+[profile.dev]
+codegen-units = 16
+debug = "limited"
+split-debuginfo = "unpacked"
