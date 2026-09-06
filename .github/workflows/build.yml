@@ -28,7 +28,7 @@ jobs:
       - name: Cache Rust
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: gpui -> target
+          workspaces: . -> target
 
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-24.04'
@@ -43,16 +43,14 @@ jobs:
             libfontconfig1-dev libfreetype6-dev
 
       - name: Check
-        working-directory: gpui
         run: cargo check
 
       - name: Build
-        working-directory: gpui
         run: cargo build
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: whale-nest-${{ matrix.platform }}
-          path: gpui/target/debug/whalenest*
+          path: target/debug/whalenest*
           if-no-files-found: error

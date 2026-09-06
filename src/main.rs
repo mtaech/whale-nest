@@ -111,7 +111,7 @@ fn window_options() -> WindowOptions {
 
 /// 窗口图标（X11；从仓库内图标 PNG 解码缩放）。
 fn load_window_icon() -> Option<std::sync::Arc<image::RgbaImage>> {
-    let bytes = include_bytes!("../../public/whalenest-mark.png");
+    let bytes = include_bytes!("../public/whalenest-mark.png");
     let img = image::load_from_memory(bytes).ok()?;
     let small = img.resize(128, 128, image::imageops::FilterType::Triangle);
     Some(std::sync::Arc::new(small.to_rgba8()))

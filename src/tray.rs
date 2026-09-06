@@ -23,7 +23,7 @@ pub fn tray_active() -> bool {
 
 /// 解码仓库内图标并缩到托盘尺寸。
 fn tray_icon_rgba() -> Option<(u32, u32, Vec<u8>)> {
-    let bytes = include_bytes!("../../public/whalenest-mark.png");
+    let bytes = include_bytes!("../public/whalenest-mark.png");
     let img = image::load_from_memory(bytes).ok()?;
     let small = img.resize(32, 32, image::imageops::FilterType::Triangle);
     let rgba = small.to_rgba8();

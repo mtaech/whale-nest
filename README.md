@@ -36,9 +36,8 @@ npm install -g @deepseek-ai/dsh
 ### 构建与运行
 
 ```bash
-cd gpui
-cargo run       # 开发运行
-cargo build     # 生成可执行文件 gpui/target/debug/whalenest
+cargo run       # 开发运行（仓库根目录即 GPUI 工程根）
+cargo build     # 生成可执行文件 target/debug/whalenest
 ```
 
 ### Linux 系统依赖
@@ -64,17 +63,16 @@ sudo apt-get install -y \
 
 ```
 .
-├── gpui/                 # GPUI 版（Rust），主程序入口 src/main.rs
-│   ├── src/
-│   │   ├── main.rs       # 入口 / 单实例锁 / 监督 / 托盘 / 主窗口
-│   │   ├── app.rs        # 应用级状态与事件总线（Managed + Control）
-│   │   ├── kernel.rs     # dsh 内核抽象（进程管理 / 就绪 / 自愈）
-│   │   ├── shell.rs      # 仪表盘卡片 UI
-│   │   ├── state.rs      # 配置持久化（active_profile + profile_cwds）
-│   │   ├── tray.rs       # 托盘（ksni / tray-icon）
-│   │   └── ...           # settings / wizard / updater / lifecycle / notify
-│   ├── docs/             # 需求规格与设计文档
-│   └── Cargo.toml
+├── src/                  # GPUI 应用源码
+│   ├── main.rs           # 入口 / 单实例锁 / 监督 / 托盘 / 主窗口
+│   ├── app.rs            # 应用级状态与事件总线（Managed + Control）
+│   ├── kernel.rs         # dsh 内核抽象（进程管理 / 就绪 / 自愈）
+│   ├── shell.rs          # 仪表盘卡片 UI
+│   ├── state.rs          # 配置持久化（active_profile + profile_cwds）
+│   ├── tray.rs           # 托盘（ksni / tray-icon）
+│   └── ...               # settings / wizard / updater / lifecycle / notify
+├── docs/                 # 需求规格与设计文档
+├── Cargo.toml            # GPUI 工程（Rust）
 ├── public/               # 应用图标（whalenest-mark.png，编译期嵌入二进制）
 ├── assets/               # 品牌 / 启动图资源
 └── tools/                # 图标处理等辅助脚本
@@ -83,7 +81,7 @@ sudo apt-get install -y \
 ## 开发约定
 
 - 运行/集成测试请用隔离环境，避免干扰用户真实在用的 dsh：`export DSH_HOME=/tmp/whalenest-test-home` + 独立端口
-- 编译验收：`cd gpui && cargo check`（首次编译 gpui-kit 依赖树较慢，约 10–30 分钟）
+- 编译验收：`cargo check`（仓库根目录直接编译；首次编译 gpui-kit 依赖树较慢，约 10–30 分钟）
 - 提交信息用中文
 
 ## 许可证

@@ -25,8 +25,8 @@
 
 - 仓库：`/home/huang/Personal/Dev/Code/melon`（melon，DSH 插件/皮肤单仓库）
 - 目标项目：`dsh-desktop/`（独立 git 仓库，名为 whalenest，恰好在 melon 目录下）
-- 工作目录：`/home/huang/Personal/Dev/Code/melon/dsh-desktop/gpui`（**GPUI 版**，未提交、untracked）
-- 改动范围：只动 `dsh-desktop/gpui/`。禁止动 `../src-tauri/`（Tauri 版旧主线）、`../prototype-egui-wry/`（废弃原型）、melon 的 `packages/*/`（插件，不归本项目）
+- 工作目录：`/home/huang/Personal/Dev/Code/melon/dsh-desktop`（**GPUI 版**，已提升到仓库根目录）
+- 改动范围：只动 `dsh-desktop/`。禁止动 `../src-tauri/`（Tauri 版旧主线）、`../prototype-egui-wry/`（废弃原型）、melon 的 `packages/*/`（插件，不归本项目）
 
 ### 一句话目标
 把 WhaleNest 从「Tauri 壳 + 内嵌 webview 显示 dsh UI」改造成「**GPUI 原生 dsh 管理器**」：dsh 仍由 dsh 自身提供并后台常驻，界面走系统默认浏览器打开，管理器只做 4 件事——**profile 管理、插件管理（复用现成 dsh-plugin-dashboard）、后台常驻守护、浏览器打开**。同时把 UI 依赖从旧的 `gpui-component 0.5.2`（本地 path）升级到 `gpui-kit 0.6`（crates.io）。
@@ -154,7 +154,7 @@ gpui-kit 0.6.0 是聚合 crate，一个依赖打包整个 GPUI 栈（含 zed 官
 ## 5. 编译环境与命令
 
 export PATH=$HOME/.cargo/bin:$PATH
-cd /home/huang/Personal/Dev/Code/melon/dsh-desktop/gpui
+cd /home/huang/Personal/Dev/Code/melon/dsh-desktop
 cargo check 2>&1 | tail -60     # 快速验收（推荐）
 cargo test                      # 单测（需显示环境则跳过 GUI 相关）
 cargo build                     # 最终构建
@@ -163,7 +163,7 @@ cargo build                     # 最终构建
 
 ## 6. 当前状态
 - `gpui/`：原始未动（所有文件停在 9 月 2 日，Cargo.toml 仍是旧 git/path 依赖）。可直接从 Phase 1 开始。若要保险，先 `cp -r gpui gpui.original-backup`。
-- 规格文档已写好：`/home/huang/Personal/Dev/Code/melon/dsh-desktop/gpui/docs/dsh-manager-spec.md`（与本文 §2 一致）。
+- 规格文档已写好：`/home/huang/Personal/Dev/Code/melon/dsh-desktop/docs/dsh-manager-spec.md`（与本文 §2 一致）。
 - 上游依赖：`gpui-kit 0.6` 需要网络从 crates.io 拉取（首次编译慢）。
 - 交接产物：本 HANDOFF.md（+ spec 文档）。接手 agent 从这里独立执行。
 

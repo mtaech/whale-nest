@@ -1,7 +1,7 @@
 # WhaleNest — dsh 管理器 完整规格（已与用户确认）
 
-> 本项目：`dsh-desktop/gpui`。是 dsh-desktop 仓库里 GPUI 版（未提交目录），从 Tauri 版移植而来。
-> 本规格是最终确认稿，所有 subagent 以本文档为需求基准。改动范围：**只动 `dsh-desktop/gpui/`**，禁止动 `src-tauri/`（Tauri 版）和 `prototype-egui-wry/`。
+> 本项目：`dsh-desktop`。是 dsh-desktop 仓库里 GPUI 版（已提升到仓库根目录），从 Tauri 版移植而来。
+> 本规格是最终确认稿，所有 subagent 以本文档为需求基准。改动范围：**只动 `dsh-desktop/`**，禁止动 `src-tauri/`（Tauri 版）和 `prototype-egui-wry/`。
 
 ## 1. 定位
 - 名称：WhaleNest（保留，图标/托盘/自启项沿用）
@@ -85,7 +85,7 @@
 | 删 | `webview.rs` `host.rs` `bridge.rs` `bridge.js` | webview 链路 |
 
 ## 9. 现有代码结构（改造前）
-`dsh-desktop/gpui/src/`：
+`dsh-desktop/src/`：
 - `main.rs`：入口、单实例锁、全局状态、监督线程、托盘、控制监听、主窗口（Root<Shell>）
 - `app.rs`：`Managed`（全局）、`Control` 枚举、内核启停/监督/环境检测/插件/更新、`AppEvent`
 - `kernel.rs`：`KernelConfig`（已有 `profile` 字段）+ `Kernel`（resolve/spawn/supervise/diagnose）
