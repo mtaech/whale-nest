@@ -325,4 +325,29 @@ mod tests {
             &PathBuf::from("/tmp/new")
         );
     }
+
+    #[test]
+    fn encodes_ascii_cwd_like_dsh() {
+        // Must match a real session dir name observed on disk.
+        assert_eq!(
+            encode_session_dir_name(Path::new("/home/huang/Personal/Dev/Code/melon")),
+            "--home-huang-Personal-Dev-Code-melon--"
+        );
+    }
+
+    #[test]
+    fn encodes_non_ascii_as_utf16_hex() {
+        // 项=U+9879 目=U+76EE 中=U+4E2D
+        assert_eq!(
+            encode_session_dir_name(Path::new("/a/项目/中")),
+            "--a-~9879~76EE-~4E2D--"
+        );
+    }
+
+    #[test]
+    fn profile_cwd_falls_back_to_home() {
+        let state = AppState::default();
+        let cwd = state.profile_cwd("missing");
+        assert!(!cwd.as_os_str().is_empty());
+    }
 }

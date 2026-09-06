@@ -798,3 +798,87 @@ pub fn create_profile(managed: &Managed, name: String) -> Result<(), String> {
     switch_profile(managed, name);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 建一个隔离的临时目录（绝不碰 `~/.dsh`），并带清理钩子。
+    fn temp_ctx(name: &str) -> (PathBuf, impl FnOnce()) {
+        let dir = std::env::temp_dir().join(format!(
+            "whalenest-test-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+        let cleanup_dir = dir.clone();
+        (dir, move || {
+            let _ = std::fs::remove_dir_all(&cleanup_dir);
+        })
+    }
+
+    #[test]
+    fn reads_web_profile_bundles() {
+        let (dir, clean) = temp_ctx("bundles-web");
+        let pkg = dir.join("package.json");
+        std::fs::write(
+            &pkg,
+            r#"{
+  "name": "dsh-profile-web",
+  "dependencies": { "dsh-x": "^0.1" },
+  "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-skin-material-you"] } }
+}"#,
+        )
+        .unwrap();
+        let (bundles, is_web) = read_profile_bundles(&pkg);
+        assert!(is_web);
+        assert!(bundles.contains(&"@deepseek-ai/dsh-web-app".to_string()));
+        assert_eq!(
+            bundles.iter().filter(|b| !b.starts_with("@deepseek-ai/")).count(),
+            1 // dsh-skin-material-you
+        );
+        clean();
+    }
+
+    #[test]
+    fn non_web_profile_is_not_web_type() {
+        let (dir, clean) = temp_ctx("bundles-tui");
+        let pkg = dir.join("package.json");
+        std::fs::write(
+            &pkg,
+            r#"{
+  "dependencies": {},
+  "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "dsh-skin-material-you"] } }
+}"#,
+        )
+        .unwrap();
+        let (_, is_web) = read_profile_bundles(&pkg);
+        assert!(!is_web);
+        clean();
+    }
+
+    #[test]
+    fn session_stats_counts_dirs_by_encoded_cwd() {
+        let (dir, clean) = temp_ctx("sessions");
+        let encoded = state::encode_session_dir_name(Path::new("/home/huang/proj"));
+        let session_dir = dir.join(&encoded);
+        std::fs::create_dir_all(session_dir.join("a")).unwrap();
+        std::fs::create_dir_all(session_dir.join("b")).unwrap();
+        std::fs::create_dir_all(session_dir.join("c")).unwrap();
+        std::fs::write(session_dir.join("mtime-marker"), b"x").unwrap();
+
+        let (count, last) = session_stats(&dir, Path::new("/home/huang/proj"));
+        assert_eq!(count, 3);
+        assert!(last.is_some());
+        clean();
+    }
+
+    #[test]
+    fn session_stats_empty_for_unknown_cwd() {
+        let (dir, clean) = temp_ctx("sessions-empty");
+        let (count, last) = session_stats(&dir, Path::new("/no/such/cwd"));
+        assert_eq!(count, 0);
+        assert!(last.is_none());
+        clean();
+    }
+}
