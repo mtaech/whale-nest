@@ -10,7 +10,24 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants}, h_flex, label::Label, switch::Switch, v_flex,
 };
 
+use crate::app::Managed;
 use crate::shell::Shell;
+
+/// 从 `Managed` 全局读一份设置快照（**不走 Shell 实体**，避免在对话框 build
+/// 闭包内读取 Shell 造成的 entity 重入 panic）。
+fn settings_snapshot_from_global(cx: &App) -> crate::shell::SettingsSnapshot {
+    let managed = cx.global::<Managed>();
+    let cfg = managed.config.lock();
+    let update = managed.update.lock();
+    crate::shell::SettingsSnapshot {
+        autostart: cfg.autostart,
+        lock_port: cfg.lock_port,
+        update: match update.as_ref() {
+            Some(u) => (u.current.clone(), u.latest.clone(), u.has_update),
+            None => Default::default(),
+        },
+    }
+}
 
 /// 构建设置面板内容（在 open_dialog 的 build 闭包内调用）。
 pub(crate) fn settings_panel(
@@ -18,7 +35,7 @@ pub(crate) fn settings_panel(
     window: &mut Window,
     cx: &mut App,
 ) -> impl IntoElement {
-    let snapshot = shell.read(cx).settings_snapshot();
+    let snapshot = settings_snapshot_from_global(cx);
     let autostart = snapshot.autostart;
     let lock_port = snapshot.lock_port;
     let (current, latest, has_update) = snapshot.update;

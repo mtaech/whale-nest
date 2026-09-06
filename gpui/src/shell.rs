@@ -73,21 +73,6 @@ pub struct SettingsSnapshot {
 }
 
 impl Shell {
-    /// 供设置对话框读取的当前配置快照。
-    pub(crate) fn settings_snapshot(&self) -> SettingsSnapshot {
-        let cfg = self.managed.config.lock();
-        SettingsSnapshot {
-            autostart: cfg.autostart,
-            lock_port: cfg.lock_port,
-            update: match &self.update {
-                Some(u) => (u.current.clone(), u.latest.clone(), u.has_update),
-                None => Default::default(),
-            },
-        }
-    }
-}
-
-impl Shell {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         gpui_kit::component::theme::Theme::change(
             gpui_kit::component::theme::ThemeMode::Dark,
@@ -598,10 +583,10 @@ impl Shell {
         let header = h_flex()
             .id("whalenest-dash-header")
             .w_full()
-            .flex_1()
             .items_center()
             .justify_between()
-            .child(Label::new("dsh profiles").text_lg().font_semibold())
+            .pb_1()
+            .child(Label::new("dsh profiles").text_xl().font_semibold())
             .child(
                 h_flex()
                     .id("whalenest-dash-actions")
@@ -638,7 +623,8 @@ impl Shell {
                 .overflow_y_scroll()
                 .grid()
                 .grid_cols(if wide { 2 } else { 1 })
-                .gap_3()
+                .gap_4()
+                .items_start()
                 .children(
                     web_profiles
                         .iter()
@@ -650,9 +636,9 @@ impl Shell {
         v_flex()
             .id("whalenest-dashboard")
             .size_full()
-            .gap_3()
-            .px_4()
-            .py_3()
+            .gap_4()
+            .px_6()
+            .py_5()
             .child(header)
             .child(body)
             .child(self.render_log_block(window, cx))
@@ -708,17 +694,16 @@ impl Shell {
         let name_cwd = name.clone();
         let name_del = name.clone();
 
-        h_flex()
+        v_flex()
             .id(format!("whalenest-profile-card-{}", profile.name))
-            .flex_col()
-            .gap_2()
+            .gap_3()
             .p_4()
-            .rounded_lg()
+            .rounded_md()
             .border_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().popover)
+            // 头部：名称 + 状态 pill + 端口 badge
             .child(
-                // 头部：名称 + 状态灯 + 端口 badge
                 h_flex()
                     .id(format!("whalenest-card-head-{}", profile.name))
                     .items_center()
@@ -728,16 +713,19 @@ impl Shell {
                             .id(format!("whalenest-card-title-{}", profile.name))
                             .gap_2()
                             .items_center()
-                            .child(Label::new(profile.name.clone()).text_sm().font_semibold())
+                            .child(Label::new(profile.name.clone()).text_base().font_semibold())
                             .child(
                                 h_flex()
                                     .id(format!("whalenest-card-status-{}", profile.name))
-                                    .gap_1()
-                                    .items_center()
+                                    .gap_1p5()
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_full()
+                                    .bg(dot_color.opacity(0.14))
                                     .child(
                                         div()
                                             .id(format!("whalenest-card-dot-{}", profile.name))
-                                            .size_2()
+                                            .size_1p5()
                                             .rounded_full()
                                             .bg(dot_color),
                                     )
@@ -752,7 +740,8 @@ impl Shell {
                         this.child(
                             h_flex()
                                 .id(format!("whalenest-card-port-{}", profile.name))
-                                .px_1p5()
+                                .gap_1()
+                                .px_2()
                                 .py_0p5()
                                 .rounded_md()
                                 .bg(cx.theme().primary.opacity(0.12))
@@ -768,22 +757,10 @@ impl Shell {
             .child(
                 v_flex()
                     .id(format!("whalenest-card-meta-{}", profile.name))
-                    .gap_1()
-                    .child(
-                        Label::new(format!("{} 个插件", profile.plugin_count))
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground),
-                    )
-                    .child(
-                        Label::new(format!("目录：{cwd_text}"))
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground),
-                    )
-                    .child(
-                        Label::new(session_text)
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground),
-                    ),
+                    .gap_1p5()
+                    .child(card_meta("插件", &format!("{} 个", profile.plugin_count), cx))
+                    .child(card_meta("目录", &shorten_path(&cwd_text, 44), cx))
+                    .child(card_meta("会话", &session_text, cx)),
             )
             // 操作按钮
             .child(
@@ -1097,6 +1074,27 @@ pub(crate) fn copy_text(text: &str, window: &mut Window, cx: &mut App) {
     match result {
         Ok(()) => window.push_notification((NotificationType::Success, "已复制到剪贴板"), cx),
         Err(_) => window.push_notification((NotificationType::Error, "复制失败"), cx),
+    }
+}
+
+/// meta 键值行（键 muted，值 foreground）。
+fn card_meta(label: &str, value: &str, cx: &App) -> impl IntoElement {
+    h_flex()
+        .gap_2()
+        .items_center()
+        .child(Label::new(label).text_xs().text_color(cx.theme().muted_foreground))
+        .child(Label::new(value).text_xs().text_color(cx.theme().foreground))
+}
+
+/// 过长路径的省略显示。
+fn shorten_path(s: &str, max: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        s.to_string()
+    } else {
+        let head: String = chars[..max / 2].iter().collect();
+        let tail: String = chars[chars.len() - max / 2..].iter().collect();
+        format!("{head}…{tail}")
     }
 }
 
