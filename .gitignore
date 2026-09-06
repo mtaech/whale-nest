@@ -1,10 +1,5 @@
-# Node
-node_modules/
-dist/
-
-# Rust / Tauri
-src-tauri/target/
-src-tauri/gen/
+# Rust / Cargo
+gpui/target/
 
 # Editor / OS
 .vscode/
