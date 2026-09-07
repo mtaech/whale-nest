@@ -4,9 +4,11 @@
 //! profile 一张卡，呈现运行状态、meta 信息与操作按钮；底部展示当前 profile 的日志 tail。
 
 use gpui_kit::{
-    App, AsyncWindowContext, ClickEvent, Context, Entity, Hsla, Render, WeakEntity, Window, div,
+    App, AsyncWindowContext, ClickEvent, Context, Entity, Hsla, Render, ScrollHandle, WeakEntity,
+    Window, div,
     prelude::*, px,
 };
+use gpui_kit::base::Scrollbar;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Root, Sizable as _, StyledExt as _,
     TitleBar, WindowExt as _, button::{Button, ButtonVariants}, h_flex,
@@ -52,6 +54,8 @@ pub struct Shell {
     selected_profile: Option<String>,
     /// 底部日志区块展示的 tail。
     log_tail: String,
+    /// 日志滚动区句柄（跟随尾部 + 滚动条）。
+    log_scroll: ScrollHandle,
     /// 待前台打开（点「浏览器打开」但内核未就绪时置位）。
     pending_open: bool,
     /// 创建 profile 对话框的输入状态。
@@ -107,6 +111,7 @@ impl Shell {
             profiles: Vec::new(),
             selected_profile: Some(active_profile),
             log_tail: String::new(),
+            log_scroll: ScrollHandle::new(),
             pending_open: false,
             create_input: None,
             install_input: None,
@@ -158,6 +163,8 @@ impl Shell {
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
         self.profiles = app::scan_profiles(&self.managed);
         self.log_tail = self.managed.kernel.lock().log_tail(120);
+        // 日志更新后滚动到底部跟随最新；若以后要保留用户上滚位置，需先判 offset。
+        self.log_scroll.scroll_to_bottom();
         cx.notify();
     }
 
@@ -1208,7 +1215,8 @@ impl Shell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let lines = self.log_tail.lines().rev().take(30).collect::<Vec<_>>();
+        // 终端式日志：旧在上、新在下，全部展示以允许上滚查看历史。
+        let lines = self.log_tail.lines().collect::<Vec<_>>();
         let profile_name = profile.name.clone();
 
         v_flex()
@@ -1258,15 +1266,22 @@ impl Shell {
                     ),
             )
             .child(
-                // 日志输出滚动区域
-                v_flex()
-                    .id("whalenest-console-body")
+                // 日志输出滚动区域（包裹层 relative，滚动条只覆盖日志区，不含标题栏）
+                div()
+                    .id("whalenest-console-body-wrap")
+                    .relative()
                     .flex_1()
                     .w_full()
-                    .overflow_y_scroll()
-                    .p_3()
-                    .gap_1()
-                    .children(lines.into_iter().map(|l| {
+                    .min_h_0()
+                    .child(
+                        v_flex()
+                            .id("whalenest-console-body")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.log_scroll)
+                            .p_3()
+                            .gap_1()
+                            .children(lines.into_iter().map(|l| {
                         let is_err = l.contains("err") || l.contains("Error") || l.contains("ERR");
                         let is_url = l.contains("http://") || l.contains("https://");
                         let color = if is_err {
@@ -1286,6 +1301,8 @@ impl Shell {
                                     .text_color(color),
                             )
                     })),
+                        )
+                        .child(Scrollbar::vertical(&self.log_scroll)),
             )
     }
 
