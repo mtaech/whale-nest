@@ -13,3 +13,5 @@ Thumbs.db
 
 # Icon backup (pre-transparency originals)
 .icon-backup/
+# Build output
+/dist/
