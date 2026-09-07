@@ -14,6 +14,11 @@ PKG="${NAME}_${VERSION}_${ARCH}"
 # 1. release 构建
 cargo build --release --bin "$NAME"
 
+# 解析真实 target 目录（用户可能通过 ~/.cargo/config.toml 的 build.target-dir 重定向）
+TARGET_DIR=$(cargo metadata --no-deps --format-version 1 \
+  | grep -o '"target_directory":"[^"]*"' | head -1 | cut -d'"' -f4)
+BIN="$TARGET_DIR/release/$NAME"
+
 # 2. 组装 deb 目录
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
@@ -22,7 +27,7 @@ mkdir -p "$root/DEBIAN" "$root/usr/bin" "$root/usr/share/applications" \
          "$root/usr/share/icons/hicolor/512x512/apps" "$root/usr/share/doc/$NAME" \
          "$stage/debian"
 
-install -m755 "target/release/$NAME" "$root/usr/bin/$NAME"
+install -m755 "$BIN" "$root/usr/bin/$NAME"
 
 # 图标: 512 一张，由桌面环境缩放
 magick public/whalenest-mark.png -resize 512x512 "$root/usr/share/icons/hicolor/512x512/apps/${APP_ID}.png"
@@ -54,7 +59,6 @@ Package: $NAME
 Architecture: $ARCH
 EOF
 DEPS=$(cd "$stage" && dpkg-shlibdeps -O "$PKG/usr/bin/$NAME" | sed 's/^shlibs:Depends=//')
-
 cat > "$root/DEBIAN/control" <<EOF
 Package: $NAME
 Version: $VERSION
