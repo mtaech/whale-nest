@@ -228,6 +228,8 @@ impl Shell {
                     NotificationType::Error
                 };
                 window.push_notification((notif, message), cx);
+                // 插件列表可能有变（升级后版本变化），下次渲染重查 outdated。
+                self.outdated_profile = None;
                 self.refresh(cx);
             }
             AppEvent::PluginOutdated { updates, .. } => {
@@ -890,16 +892,18 @@ impl Shell {
                                 h_flex()
                                     .gap_2()
                                     .items_center()
-                                    .child(
-                                        Button::new(format!("whalenest-plugin-update-{}", plugin))
-                                            .xsmall()
-                                            .when(latest.is_some(), |b| b.primary())
-                                            .when(latest.is_none(), |b| b.outline())
-                                            .label("升级")
-                                            .on_click(cx.listener(move |this, _: &ClickEvent, _, _| {
-                                                crate::plugin_op::update(&this.managed, prof_update.clone(), plugin_update.clone());
-                                            })),
-                                    )
+                                    // 升级按钮：仅当 outdated 确认存在新版才展示，避免无谓的硬升。
+                                    .when(latest.is_some(), |this| {
+                                        this.child(
+                                            Button::new(format!("whalenest-plugin-update-{}", plugin))
+                                                .xsmall()
+                                                .primary()
+                                                .label("升级")
+                                                .on_click(cx.listener(move |this, _: &ClickEvent, _, _| {
+                                                    crate::plugin_op::update(&this.managed, prof_update.clone(), plugin_update.clone());
+                                                })),
+                                        )
+                                    })
                                     .child(
                                         Button::new(format!("whalenest-plugin-remove-{}", plugin))
                                             .xsmall()
