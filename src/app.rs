@@ -9,7 +9,7 @@
 //! - Tauri 的 tray 事件 + `on_window_event`      → `Control` 通道，由 main.rs
 //!   里注册的应用级监听循环执行（需要 AsyncApp 能力，如重新开窗）。
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -64,7 +64,6 @@ pub enum Control {
     SwitchProfile(String),
     CreateProfile,
     DeleteProfile(String),
-    ChangeCwd,
     Stop,
     Quit,
 }
@@ -235,48 +234,8 @@ pub fn restart_kernel_impl(managed: &Managed) {
     });
 }
 
-/// 更改指定 profile 的工作目录：写入 profile_cwds；该 profile 正在运行时重启生效。
-pub fn change_cwd(managed: &Managed, profile: String, new_cwd: PathBuf) {
-    if new_cwd.as_os_str().is_empty() {
-        return;
-    }
-    {
-        let mut cfg = managed.config.lock();
-        cfg.profile_cwds.insert(profile.clone(), new_cwd.clone());
-        let _ = cfg.save();
-    }
-    {
-        let mut k = managed.kernel.lock();
-        if k.config.profile == profile {
-            k.config.cwd = new_cwd;
-        }
-    }
-    // 仅当该 profile 正在运行（即内核当前 profile）时重启生效
-    let is_running = {
-        let k = managed.kernel.lock();
-        k.config.profile == profile && !matches!(k.state, KernelState::Stopped)
-    };
-    if is_running {
-        restart_kernel_impl(managed);
-    }
-}
-
-/// 弹出系统目录选择器（rfd），选中后写入指定 profile 并（若正在运行）重启。
-pub fn prompt_change_cwd(managed: &Managed, profile: String) {
-    let current = managed.config.lock().profile_cwd(&profile);
-    let managed = managed.clone();
-    std::thread::spawn(move || {
-        if let Some(path) = rfd::FileDialog::new()
-            .set_title("选择 dsh 工作目录")
-            .set_directory(&current)
-            .pick_folder()
-        {
-            change_cwd(&managed, profile, path);
-        }
-    });
-}
-
 // ── 环境检测 / 插件（从 lib.rs 移植）─────────────────────────────────────
+
 
 fn resolve_binary_path_helper(name: &str) -> Option<String> {
     if let Some(path_var) = std::env::var_os("PATH") {

@@ -396,11 +396,6 @@ impl Shell {
         }
     }
 
-    /// 卡片「更改目录」。
-    pub(crate) fn change_cwd_for(&self, name: String) {
-        app::prompt_change_cwd(&self.managed, name);
-    }
-
     /// 卡片「删除」：弹确认框，`web` 禁删。
     pub(crate) fn confirm_delete_profile(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
         if name == crate::state::DEFAULT_PROFILE {
@@ -1031,7 +1026,6 @@ impl Shell {
 
         let name_start = profile.name.clone();
         let name_open = profile.name.clone();
-        let name_cwd = profile.name.clone();
         let name_del = profile.name.clone();
 
         h_flex()
@@ -1117,16 +1111,6 @@ impl Shell {
                             .label(if status == CardStatus::Running { "重启内核" } else { "启动 / 切换" })
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, _| {
                                 this.start_profile(name_start.clone());
-                            })),
-                    )
-                    // 更改目录
-                    .child(
-                        Button::new(format!("whalenest-hero-cwd-{}", profile.name))
-                            .ghost()
-                            .icon(IconName::Folder)
-                            .label("更改目录")
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, _| {
-                                this.change_cwd_for(name_cwd.clone());
                             })),
                     )
                     // 删除 profile

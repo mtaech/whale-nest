@@ -174,10 +174,6 @@ fn handle_control(managed: &app::Managed, control: Control, cx: &gpui_kit::Async
         // `app::create_profile`；此处字符串事件仅作占位（tray 不会触发它）。
         Control::CreateProfile => {}
         Control::DeleteProfile(name) => app::delete_profile(managed, name),
-        Control::ChangeCwd => {
-            let profile = managed.config.lock().active_profile.clone();
-            app::prompt_change_cwd(managed, profile);
-        }
         Control::Stop => app::stop_kernel(managed),
         Control::SetLockPort(v) => {
             managed.config.lock().lock_port = v;
