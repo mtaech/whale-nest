@@ -8,9 +8,11 @@
 //! 5. 打开主窗口（Root + Shell）
 
 mod app;
+mod desktop_entry;
 mod kernel;
 mod lifecycle;
 mod notify;
+mod plugin_op;
 mod readiness;
 mod settings;
 mod shell;
@@ -43,6 +45,12 @@ fn main() {
 
             let (managed, controls_rx) = app::Managed::new();
             cx.set_global(managed.clone());
+
+            // 0. Wayland / XDG 桌面入口（.desktop + 主题图标），供合成器按 app_id
+            //    解析窗口 / 任务栏图标；失败静默，不影响主流程。
+            if let Err(e) = desktop_entry::install() {
+                eprintln!("[whalenest] 安装桌面入口失败（忽略）: {e}");
+            }
 
             // 1. 内核首次启动（或引导页）
             app::start_kernel(&managed);
@@ -98,7 +106,7 @@ fn window_options() -> WindowOptions {
         titlebar: Some(gpui_kit::component::TitleBar::title_bar_options()),
         #[cfg(target_os = "linux")]
         window_decorations: Some(gpui_kit::WindowDecorations::Client),
-        app_id: Some("dev.whalenest.desktop".to_string()),
+        app_id: Some(desktop_entry::APP_ID.to_string()),
         focus: true,
         show: true,
         is_resizable: true,

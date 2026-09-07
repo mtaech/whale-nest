@@ -10,7 +10,9 @@ use gpui_kit::{
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Root, Sizable as _, StyledExt as _,
     TitleBar, WindowExt as _, button::{Button, ButtonVariants}, h_flex,
-    input::{Input, InputState}, label::Label, notification::NotificationType, v_flex,
+    input::{Input, InputState}, label::Label, notification::NotificationType, switch::Switch,
+    tab::{Tab, TabBar},
+    v_flex,
 };
 
 use crate::app::{self, AppEvent, Managed};
@@ -46,12 +48,22 @@ pub struct Shell {
     pub(crate) updating: bool,
     /// dsh profile 快照（运行时扫描，不持久化）
     profiles: Vec<ProfileInfo>,
+    /// 当前选中的 profile 名称（用于右侧工作区展示）。
+    selected_profile: Option<String>,
     /// 底部日志区块展示的 tail。
     log_tail: String,
     /// 待前台打开（点「浏览器打开」但内核未就绪时置位）。
     pending_open: bool,
     /// 创建 profile 对话框的输入状态。
     create_input: Option<Entity<InputState>>,
+    /// 插件面板「安装」输入框状态。
+    install_input: Option<Entity<InputState>>,
+    /// 当前 profile 可升级插件缓存（包名 -> 最新版本）。
+    outdated: std::collections::HashMap<String, String>,
+    /// 已查询过 outdated 的 profile 名（避免每次渲染重复查询）。
+    outdated_profile: Option<String>,
+    /// 详情区当前激活的 Tab：0=日志（默认），1=插件管理。
+    active_tab: usize,
     /// 事件订阅
     events_rx: flume::Receiver<AppEvent>,
     /// 向导状态
@@ -75,7 +87,7 @@ pub struct SettingsSnapshot {
 impl Shell {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         gpui_kit::component::theme::Theme::change(
-            gpui_kit::component::theme::ThemeMode::Dark,
+            gpui_kit::component::theme::ThemeMode::Light,
             Some(window),
             cx,
         );
@@ -85,6 +97,7 @@ impl Shell {
         let initialized = managed.config.lock().initialized;
         let snapshot = Self::snapshot_from_kernel(&managed);
 
+        let active_profile = managed.kernel.lock().config.profile.clone();
         let mut this = Self {
             managed: managed.clone(),
             state: snapshot.state,
@@ -92,9 +105,14 @@ impl Shell {
             update: managed.update.lock().clone().map(Into::into),
             updating: false,
             profiles: Vec::new(),
+            selected_profile: Some(active_profile),
             log_tail: String::new(),
             pending_open: false,
             create_input: None,
+            install_input: None,
+            outdated: std::collections::HashMap::new(),
+            outdated_profile: None,
+            active_tab: 0,
             events_rx,
             env_check: None,
             env_check_triggered: false,
@@ -192,6 +210,25 @@ impl Shell {
                 if self.show_wizard {
                     self.recheck_env(window, cx);
                 }
+            }
+            AppEvent::PluginOpStarted { message, .. } => {
+                window.push_notification((NotificationType::Info, message), cx);
+            }
+            AppEvent::PluginOpResult { ok, message, .. } => {
+                let notif = if ok {
+                    NotificationType::Success
+                } else {
+                    NotificationType::Error
+                };
+                window.push_notification((notif, message), cx);
+                self.refresh(cx);
+            }
+            AppEvent::PluginOutdated { updates, .. } => {
+                self.outdated.clear();
+                for (name, latest) in updates {
+                    self.outdated.insert(name, latest);
+                }
+                cx.notify();
             }
         }
         cx.notify();
@@ -575,73 +612,681 @@ impl Shell {
             )
     }
 
-    /// 仪表盘主视图：顶部标题 + 创建/刷新，profile 卡片网格，底部日志区块。
+    /// 仪表盘主视图：双栏工作台布局（左侧 Profiles 列表 + 右侧工作区与终端日志）。
     fn render_dashboard(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let web_profiles: Vec<ProfileInfo> =
             self.profiles.iter().filter(|p| p.is_web()).cloned().collect();
 
-        let header = h_flex()
-            .id("whalenest-dash-header")
+        if web_profiles.is_empty() {
+            return self.render_empty_dashboard(window, cx).into_any_element();
+        }
+
+        let selected_name = self.selected_profile.clone().unwrap_or_else(|| {
+            web_profiles.first().map(|p| p.name.clone()).unwrap_or_else(|| "web".to_string())
+        });
+        let active_profile = web_profiles
+            .iter()
+            .find(|p| p.name == selected_name)
+            .cloned()
+            .unwrap_or_else(|| web_profiles[0].clone());
+
+        h_flex()
+            .id("whalenest-dashboard-workbench")
+            .size_full()
+            // ── 左侧：Profile 侧边栏 ──
+            .child(
+                v_flex()
+                    .id("whalenest-dash-sidebar")
+                    .w(px(260.))
+                    .h_full()
+                    .border_r_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().muted.opacity(0.25))
+                    .p_3()
+                    .gap_3()
+                    // 侧边栏头部
+                    .child(
+                        h_flex()
+                            .id("whalenest-dash-sidebar-header")
+                            .w_full()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                Label::new("PROFILES")
+                                    .text_xs()
+                                    .font_semibold()
+                                    .text_color(cx.theme().muted_foreground),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .items_center()
+                                    .child(
+                                        Button::new("whalenest-dash-sidebar-refresh")
+                                            .ghost()
+                                            .icon(IconName::RotateCw)
+                                            .xsmall()
+                                            .tooltip("刷新")
+                                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                                this.refresh(cx);
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("whalenest-dash-sidebar-create")
+                                            .primary()
+                                            .icon(IconName::Plus)
+                                            .xsmall()
+                                            .label("新建")
+                                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                                this.open_create_dialog(window, cx);
+                                            })),
+                                    ),
+                            ),
+                    )
+                    // Profile 垂直列表
+                    .child(
+                        v_flex()
+                            .id("whalenest-dash-sidebar-list")
+                            .flex_1()
+                            .w_full()
+                            .overflow_y_scroll()
+                            .gap_1p5()
+                            .children(web_profiles.iter().map(|p| {
+                                self.render_sidebar_profile_item(p, &selected_name, cx)
+                            })),
+                    ),
+            )
+            // ── 右侧：主详情与实时终端工作区 ──
+            .child(
+                v_flex()
+                    .id("whalenest-dash-detail")
+                    .flex_1()
+                    .h_full()
+                    .p_5()
+                    .gap_4()
+                    .child(self.render_detail_hero(&active_profile, cx))
+                    .child(self.render_detail_stats(&active_profile, cx))
+                    .child(self.render_detail_tabs(&active_profile, window, cx))
+            )
+            .into_any_element()
+    }
+
+    /// 详情区 Tab 容器：实时日志 + 插件管理（默认日志）。
+    fn render_detail_tabs(&mut self, profile: &ProfileInfo, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .id("whalenest-detail-tabs")
+            .w_full()
+            .flex_1()
+            .gap_2()
+            .child(
+                TabBar::new("whalenest-detail-tabbar")
+                    .selected_index(self.active_tab)
+                    .on_click(cx.listener(|this, idx: &usize, _, cx| {
+                        this.active_tab = *idx;
+                        cx.notify();
+                    }))
+                    .child(Tab::new().label("实时日志"))
+                    .child(Tab::new().label("插件管理")),
+            )
+            .child(
+                match self.active_tab {
+                    0 => self.render_detail_console(profile, window, cx).into_any_element(),
+                    _ => self.render_detail_plugins(profile, window, cx).into_any_element(),
+                },
+            )
+    }
+
+    /// 详情区：已加载插件列表面板
+    fn render_detail_plugins(&mut self, profile: &ProfileInfo, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let entries = app::plugin_entries(profile);
+        let enabled_count = entries.iter().filter(|e| e.enabled).count();
+        let profile_name = profile.name.clone();
+
+        // 首次进入（或切换 profile 后）异步查询可升级插件，驱动「可升级」徽标。
+        if self.outdated_profile.as_deref() != Some(profile.name.as_str()) {
+            self.outdated_profile = Some(profile.name.clone());
+            crate::plugin_op::query_outdated(&self.managed, profile.name.clone());
+        }
+
+        // 安装输入框（复用实体，避免每次重渲染重建焦点状态）。
+        if self.install_input.is_none() {
+            self.install_input = Some(cx.new(|cx| InputState::new(_window, cx).placeholder("包名，如 dsh-skin-material-you")));
+        }
+        let install_input = self.install_input.clone().unwrap();
+        let input_for_click = install_input.clone();
+
+        v_flex()
+            .id("whalenest-detail-plugins")
+            .w_full()
+            .p_4()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().popover)
+            .gap_2p5()
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(Icon::new(IconName::Bot).small().text_color(cx.theme().primary))
+                            .child(
+                                Label::new(format!("插件管理 · {enabled_count} 个已启用"))
+                                    .text_sm()
+                                    .font_semibold(),
+                            ),
+                    )
+                    .child(
+                        Label::new("dsh.profile.bundles")
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground),
+                    ),
+            )
+            // 「安装插件」输入行
+            .child(
+                h_flex()
+                    .id("whalenest-plugin-install-row")
+                    .w_full()
+                    .gap_2()
+                    .items_center()
+                    .child(Input::new(&install_input).flex_1())
+                    .child({
+                        let profile_name_for_add = profile_name.clone();
+                        Button::new("whalenest-plugin-install")
+                            .primary()
+                            .icon(IconName::Plus)
+                            .label("安装")
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                let pkg = input_for_click.read(cx).value().trim().to_string();
+                                if pkg.is_empty() {
+                                    window.push_notification(
+                                        (NotificationType::Error, "请输入要安装的插件包名"),
+                                        cx,
+                                    );
+                                    return;
+                                }
+                                crate::plugin_op::add(&this.managed, profile_name_for_add.clone(), pkg);
+                            }))
+                    }),
+            )
+            .child(
+                v_flex()
+                    .w_full()
+                    .gap_1()
+                    .children(entries.iter().map(|e| {
+                        let plugin = e.name.clone();
+                        let version = e.version.clone();
+                        let enabled = e.enabled;
+                        let latest = self.outdated.get(&plugin).cloned();
+                        let prof_update = profile_name.clone();
+                        let prof_remove = profile_name.clone();
+                        let prof_switch = profile_name.clone();
+                        let plugin_update = plugin.clone();
+                        let plugin_remove = plugin.clone();
+                        h_flex()
+                            .id(format!("whalenest-plugin-row-{}", plugin))
+                            .w_full()
+                            .p_2()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(if enabled { cx.theme().primary.opacity(0.3) } else { cx.theme().border })
+                            .bg(if enabled { cx.theme().primary.opacity(0.04) } else { cx.theme().background })
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(
+                                        h_flex()
+                                            .size_2()
+                                            .rounded_full()
+                                            .bg(if enabled { cx.theme().success } else { cx.theme().muted_foreground }),
+                                    )
+                                    .child(
+                                        v_flex()
+                                            .gap_0p5()
+                                            .child(
+                                                Label::new(plugin.clone())
+                                                    .text_sm()
+                                                    .font_family("monospace")
+                                                    .font_medium()
+                                                    .text_color(cx.theme().foreground),
+                                            )
+                                            .child(
+                                                h_flex()
+                                                    .gap_1p5()
+                                                    .items_center()
+                                                    .child(
+                                                        Label::new(format!("版本 {version}"))
+                                                            .text_xs()
+                                                            .text_color(cx.theme().muted_foreground),
+                                                    )
+                                                    .when(latest.is_some(), |this| {
+                                                        this.child(
+                                                            h_flex()
+                                                                .gap_1()
+                                                                .px_1p5()
+                                                                .py_0p5()
+                                                                .rounded_full()
+                                                                .bg(cx.theme().warning.opacity(0.14))
+                                                                .child(
+                                                                    Label::new(format!("可升级 ↑ {latest}", latest = latest.clone().unwrap_or_default()))
+                                                                        .text_xs()
+                                                                        .text_color(cx.theme().warning),
+                                                                ),
+                                                        )
+                                                    }),
+                                    ),
+                                    ),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(
+                                        Button::new(format!("whalenest-plugin-update-{}", plugin))
+                                            .xsmall()
+                                            .when(latest.is_some(), |b| b.primary())
+                                            .when(latest.is_none(), |b| b.outline())
+                                            .label("升级")
+                                            .on_click(cx.listener(move |this, _: &ClickEvent, _, _| {
+                                                crate::plugin_op::update(&this.managed, prof_update.clone(), plugin_update.clone());
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new(format!("whalenest-plugin-remove-{}", plugin))
+                                            .xsmall()
+                                            .ghost()
+                                            .label("卸载")
+                                            .on_click(cx.listener(move |this, _: &ClickEvent, _, _| {
+                                                crate::plugin_op::remove(&this.managed, prof_remove.clone(), plugin_remove.clone());
+                                            })),
+                                    )
+                                    .child(
+                                        Switch::new(format!("whalenest-plugin-sw-{}", plugin))
+                                            .checked(enabled)
+                                            .on_click(cx.listener(move |this, checked: &bool, window, cx| {
+                                                match app::set_plugin_enabled(&this.managed, &prof_switch, &plugin, *checked) {
+                                                    Ok(()) => {
+                                                        window.push_notification(
+                                                            (NotificationType::Success, format!("「{plugin}」已{}", if *checked { "启用" } else { "禁用" })),
+                                                            cx,
+                                                        );
+                                                    }
+                                                    Err(e) => {
+                                                        window.push_notification((NotificationType::Error, e), cx);
+                                                    }
+                                                }
+                                                this.refresh(cx);
+                                            })),
+                                    ),
+                            )
+                    })),
+            )
+    }
+
+    /// 侧边栏单个 Profile 条目
+    fn render_sidebar_profile_item(
+        &self,
+        profile: &ProfileInfo,
+        selected_name: &str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let is_selected = profile.name == selected_name;
+        let status = self.card_status(&profile.name);
+        let (dot_color, status_label) = match status {
+            CardStatus::Running => (cx.theme().success, "运行中"),
+            CardStatus::Starting => (cx.theme().warning, "启动中"),
+            CardStatus::Stopped => (cx.theme().muted_foreground, "已停止"),
+            CardStatus::Error => (cx.theme().danger, "出错"),
+        };
+        let port = self.card_port(&profile.name);
+        let name_select = profile.name.clone();
+
+        h_flex()
+            .id(format!("whalenest-sidebar-item-{}", profile.name))
+            .w_full()
+            .p_2p5()
+            .rounded_md()
+            .border_1()
+            .border_color(if is_selected { cx.theme().primary.opacity(0.5) } else { Hsla::transparent_black() })
+            .bg(if is_selected { cx.theme().popover } else { Hsla::transparent_black() })
+            .items_center()
+            .justify_between()
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.selected_profile = Some(name_select.clone());
+                cx.notify();
+            }))
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(
+                        Label::new(profile.name.clone())
+                            .text_sm()
+                            .font_medium()
+                            .text_color(if is_selected { cx.theme().foreground } else { cx.theme().muted_foreground }),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_1p5()
+                            .items_center()
+                            .child(
+                                div()
+                                    .size_1p5()
+                                    .rounded_full()
+                                    .bg(dot_color),
+                            )
+                            .child(
+                                Label::new(status_label)
+                                    .text_xs()
+                                    .text_color(dot_color),
+                            )
+                            .child(
+                                Label::new(format!("· {} 插件", profile.plugin_count))
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground),
+                            ),
+                    ),
+            )
+            .when(port.is_some(), |this| {
+                this.child(
+                    h_flex()
+                        .px_1p5()
+                        .py_0p5()
+                        .rounded_sm()
+                        .bg(cx.theme().primary.opacity(0.12))
+                        .child(
+                            Label::new(format!("{}", port.unwrap()))
+                                .text_xs()
+                                .font_family("monospace")
+                                .text_color(cx.theme().primary),
+                        ),
+                )
+            })
+    }
+
+    /// 详情区 Hero 标题与主操作栏
+    fn render_detail_hero(&self, profile: &ProfileInfo, cx: &mut Context<Self>) -> impl IntoElement {
+        let status = self.card_status(&profile.name);
+        let (dot_color, status_label) = match status {
+            CardStatus::Running => (cx.theme().success, "运行中"),
+            CardStatus::Starting => (cx.theme().warning, "启动中"),
+            CardStatus::Stopped => (cx.theme().muted_foreground, "已停止"),
+            CardStatus::Error => (cx.theme().danger, "出错"),
+        };
+        let port = self.card_port(&profile.name);
+
+        let name_start = profile.name.clone();
+        let name_open = profile.name.clone();
+        let name_cwd = profile.name.clone();
+        let name_del = profile.name.clone();
+
+        h_flex()
+            .id("whalenest-detail-hero")
             .w_full()
             .items_center()
             .justify_between()
-            .pb_1()
-            .child(Label::new("dsh profiles").text_xl().font_semibold())
+            .p_4()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().popover)
+            .child(
+                v_flex()
+                    .gap_1p5()
+                    .child(
+                        h_flex()
+                            .gap_3()
+                            .items_center()
+                            .child(
+                                Label::new(profile.name.clone())
+                                    .text_2xl()
+                                    .font_bold(),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_1p5()
+                                    .px_2p5()
+                                    .py_1()
+                                    .rounded_full()
+                                    .bg(dot_color.opacity(0.14))
+                                    .child(
+                                        div()
+                                            .size_2()
+                                            .rounded_full()
+                                            .bg(dot_color),
+                                    )
+                                    .child(
+                                        Label::new(status_label)
+                                            .text_xs()
+                                            .font_medium()
+                                            .text_color(dot_color),
+                                    ),
+                            )
+                            .when(port.is_some(), |this| {
+                                this.child(
+                                    h_flex()
+                                        .px_2()
+                                        .py_0p5()
+                                        .rounded_md()
+                                        .bg(cx.theme().primary.opacity(0.12))
+                                        .child(
+                                            Label::new(format!("端口 {}", port.unwrap()))
+                                                .text_xs()
+                                                .font_family("monospace")
+                                                .font_semibold()
+                                                .text_color(cx.theme().primary),
+                                        ),
+                                )
+                            }),
+                    ),
+            )
             .child(
                 h_flex()
-                    .id("whalenest-dash-actions")
-                    .gap_2()
+                    .id("whalenest-hero-actions")
+                    .gap_2p5()
                     .items_center()
+                    // 核心高频主按钮：在浏览器打开 Web UI (Primary)
                     .child(
-                        Button::new("whalenest-dash-create")
+                        Button::new(format!("whalenest-hero-open-{}", profile.name))
                             .primary()
-                            .icon(IconName::Plus)
-                            .label("创建 profile")
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.open_create_dialog(window, cx);
+                            .icon(IconName::ExternalLink)
+                            .label("在浏览器打开 Web UI")
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, _| {
+                                this.open_browser_for(name_open.clone());
                             })),
                     )
+                    // 重启 / 启动
                     .child(
-                        Button::new("whalenest-dash-refresh")
+                        Button::new(format!("whalenest-hero-start-{}", profile.name))
                             .outline()
-                            .icon(IconName::Redo2)
-                            .label("刷新")
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.refresh(cx);
+                            .icon(IconName::RotateCw)
+                            .label(if status == CardStatus::Running { "重启内核" } else { "启动 / 切换" })
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, _| {
+                                this.start_profile(name_start.clone());
+                            })),
+                    )
+                    // 更改目录
+                    .child(
+                        Button::new(format!("whalenest-hero-cwd-{}", profile.name))
+                            .ghost()
+                            .icon(IconName::Folder)
+                            .label("更改目录")
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, _| {
+                                this.change_cwd_for(name_cwd.clone());
+                            })),
+                    )
+                    // 删除 profile
+                    .child(
+                        Button::new(format!("whalenest-hero-del-{}", profile.name))
+                            .ghost()
+                            .icon(IconName::Delete)
+                            .label("删除")
+                            .disabled(profile.name == crate::state::DEFAULT_PROFILE)
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                this.confirm_delete_profile(name_del.clone(), window, cx);
                             })),
                     ),
-            );
+            )
+    }
 
-        let body = if web_profiles.is_empty() {
-            self.render_empty_dashboard(window, cx).into_any_element()
-        } else {
-            let wide = window.bounds().size.width >= px(980.);
-            div()
-                .id("whalenest-dash-grid")
-                .w_full()
-                .flex_1()
-                .overflow_y_scroll()
-                .grid()
-                .grid_cols(if wide { 2 } else { 1 })
-                .gap_4()
-                .items_start()
-                .children(
-                    web_profiles
-                        .iter()
-                        .map(|p| self.render_profile_card(p, cx)),
-                )
-                .into_any_element()
-        };
+    /// 详情区 运行指标卡片 (Stats / Info)
+    fn render_detail_stats(&self, profile: &ProfileInfo, cx: &App) -> impl IntoElement {
+        let cwd_text = profile.cwd.to_string_lossy().into_owned();
+        let session_text = session_text(profile.session_count, profile.last_session_time);
+
+        h_flex()
+            .id("whalenest-detail-stats")
+            .w_full()
+            .gap_3()
+            .child(
+                h_flex()
+                    .flex_1()
+                    .p_3()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().popover)
+                    .gap_2p5()
+                    .items_center()
+                    .child(Icon::new(IconName::Folder).small().text_color(cx.theme().muted_foreground))
+                    .child(
+                        v_flex()
+                            .gap_0p5()
+                            .child(Label::new("工作目录").text_xs().text_color(cx.theme().muted_foreground))
+                            .child(Label::new(shorten_path(&cwd_text, 40)).text_sm().font_family("monospace")),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .flex_1()
+                    .p_3()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().popover)
+                    .gap_2p5()
+                    .items_center()
+                    .child(Icon::new(IconName::Bot).small().text_color(cx.theme().muted_foreground))
+                    .child(
+                        v_flex()
+                            .gap_0p5()
+                            .child(Label::new("插件配置").text_xs().text_color(cx.theme().muted_foreground))
+                            .child(Label::new(format!("{} 个插件已启用", profile.plugin_count)).text_sm()),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .flex_1()
+                    .p_3()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().popover)
+                    .gap_2p5()
+                    .items_center()
+                    .child(Icon::new(IconName::RotateCw).small().text_color(cx.theme().muted_foreground))
+                    .child(
+                        v_flex()
+                            .gap_0p5()
+                            .child(Label::new("会话活跃").text_xs().text_color(cx.theme().muted_foreground))
+                            .child(Label::new(session_text).text_sm()),
+                    ),
+            )
+    }
+
+    /// 详情区 现代化终端日志面板 (撑满垂直剩余空间)
+    fn render_detail_console(
+        &self,
+        profile: &ProfileInfo,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let lines = self.log_tail.lines().rev().take(30).collect::<Vec<_>>();
+        let profile_name = profile.name.clone();
 
         v_flex()
-            .id("whalenest-dashboard")
-            .size_full()
-            .gap_4()
-            .px_6()
-            .py_5()
-            .child(header)
-            .child(body)
-            .child(self.render_log_block(window, cx))
+            .id("whalenest-detail-console")
+            .w_full()
+            .flex_1()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().popover)
+            .child(
+                // 终端标题栏
+                h_flex()
+                    .id("whalenest-console-header")
+                    .w_full()
+                    .px_4()
+                    .py_2p5()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(Icon::new(IconName::File).small().text_color(cx.theme().muted_foreground))
+                            .child(
+                                Label::new(format!("实时终端输出 · {}", profile_name))
+                                    .text_sm()
+                                    .font_semibold(),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                Button::new("whalenest-console-open-log")
+                                    .xsmall()
+                                    .outline()
+                                    .icon(IconName::File)
+                                    .label("打开完整日志文件")
+                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                        this.open_log(window, cx);
+                                    })),
+                            ),
+                    ),
+            )
+            .child(
+                // 日志输出滚动区域
+                v_flex()
+                    .id("whalenest-console-body")
+                    .flex_1()
+                    .w_full()
+                    .overflow_y_scroll()
+                    .p_3()
+                    .gap_1()
+                    .children(lines.into_iter().map(|l| {
+                        let is_err = l.contains("err") || l.contains("Error") || l.contains("ERR");
+                        let is_url = l.contains("http://") || l.contains("https://");
+                        let color = if is_err {
+                            cx.theme().danger
+                        } else if is_url {
+                            cx.theme().primary
+                        } else {
+                            cx.theme().muted_foreground
+                        };
+
+                        h_flex()
+                            .w_full()
+                            .child(
+                                Label::new(format!("  {l}"))
+                                    .text_xs()
+                                    .font_family("monospace")
+                                    .text_color(color),
+                            )
+                    })),
+            )
     }
 
     fn render_empty_dashboard(
@@ -676,141 +1321,6 @@ impl Shell {
             )
     }
 
-    fn render_profile_card(&self, profile: &ProfileInfo, cx: &mut Context<Self>) -> impl IntoElement {
-        let status = self.card_status(&profile.name);
-        let (dot_color, status_label) = match status {
-            CardStatus::Running => (cx.theme().success, "运行中"),
-            CardStatus::Starting => (cx.theme().warning, "启动中"),
-            CardStatus::Stopped => (cx.theme().muted_foreground, "已停止"),
-            CardStatus::Error => (cx.theme().danger, "出错"),
-        };
-        let port = self.card_port(&profile.name);
-        let session_text = session_text(profile.session_count, profile.last_session_time);
-
-        let name = profile.name.clone();
-        let cwd_text = profile.cwd.to_string_lossy().into_owned();
-        let name_start = name.clone();
-        let name_open = name.clone();
-        let name_cwd = name.clone();
-        let name_del = name.clone();
-
-        v_flex()
-            .id(format!("whalenest-profile-card-{}", profile.name))
-            .gap_3()
-            .p_4()
-            .rounded_md()
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().popover)
-            // 头部：名称 + 状态 pill + 端口 badge
-            .child(
-                h_flex()
-                    .id(format!("whalenest-card-head-{}", profile.name))
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        h_flex()
-                            .id(format!("whalenest-card-title-{}", profile.name))
-                            .gap_2()
-                            .items_center()
-                            .child(Label::new(profile.name.clone()).text_base().font_semibold())
-                            .child(
-                                h_flex()
-                                    .id(format!("whalenest-card-status-{}", profile.name))
-                                    .gap_1p5()
-                                    .px_2()
-                                    .py_0p5()
-                                    .rounded_full()
-                                    .bg(dot_color.opacity(0.14))
-                                    .child(
-                                        div()
-                                            .id(format!("whalenest-card-dot-{}", profile.name))
-                                            .size_1p5()
-                                            .rounded_full()
-                                            .bg(dot_color),
-                                    )
-                                    .child(
-                                        Label::new(status_label)
-                                            .text_xs()
-                                            .text_color(dot_color),
-                                    ),
-                            ),
-                    )
-                    .when(port.is_some(), |this| {
-                        this.child(
-                            h_flex()
-                                .id(format!("whalenest-card-port-{}", profile.name))
-                                .gap_1()
-                                .px_2()
-                                .py_0p5()
-                                .rounded_md()
-                                .bg(cx.theme().primary.opacity(0.12))
-                                .child(
-                                    Label::new(format!("端口 {}", port.unwrap()))
-                                        .text_xs()
-                                        .text_color(cx.theme().primary),
-                                ),
-                        )
-                    }),
-            )
-            // meta 三行：插件数 / 工作目录 / 最近会话
-            .child(
-                v_flex()
-                    .id(format!("whalenest-card-meta-{}", profile.name))
-                    .gap_1p5()
-                    .child(card_meta("插件", &format!("{} 个", profile.plugin_count), cx))
-                    .child(card_meta("目录", &shorten_path(&cwd_text, 44), cx))
-                    .child(card_meta("会话", &session_text, cx)),
-            )
-            // 操作按钮
-            .child(
-                h_flex()
-                    .id(format!("whalenest-card-actions-{}", profile.name))
-                    .gap_2()
-                    .flex_wrap()
-                    .child(
-                        Button::new(format!("whalenest-card-start-{}", profile.name))
-                            .small()
-                            .primary()
-                            .label(if status == CardStatus::Running { "重启" } else { "启动/切换" })
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, _| {
-                                this.start_profile(name_start.clone());
-                            })),
-                    )
-                    .child(
-                        Button::new(format!("whalenest-card-open-{}", profile.name))
-                            .small()
-                            .outline()
-                            .icon(IconName::ExternalLink)
-                            .label("浏览器")
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, _| {
-                                this.open_browser_for(name_open.clone());
-                            })),
-                    )
-                    .child(
-                        Button::new(format!("whalenest-card-cwd-{}", profile.name))
-                            .small()
-                            .ghost()
-                            .icon(IconName::Folder)
-                            .label("更改目录")
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, _| {
-                                this.change_cwd_for(name_cwd.clone());
-                            })),
-                    )
-                    .child(
-                        Button::new(format!("whalenest-card-del-{}", profile.name))
-                            .small()
-                            .ghost()
-                            .icon(IconName::Delete)
-                            .label("删除")
-                            .disabled(profile.name == crate::state::DEFAULT_PROFILE)
-                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                this.confirm_delete_profile(name_del.clone(), window, cx);
-                            })),
-                    ),
-            )
-    }
-
     /// 卡片状态灯：内核当前 profile + KernelState 推导。
     fn card_status(&self, profile_name: &str) -> CardStatus {
         let kernel = self.managed.kernel.lock();
@@ -833,53 +1343,6 @@ impl Shell {
         } else {
             None
         }
-    }
-
-    /// 底部日志区块：当前 profile 的 tail + 「打开完整日志文件」。
-    fn render_log_block(&self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let profile = self.managed.kernel.lock().config.profile.clone();
-        let lines = self.log_tail.lines().rev().take(20).collect::<Vec<_>>();
-        h_flex()
-            .id("whalenest-log-block")
-            .w_full()
-            .h(px(160.))
-            .flex_col()
-            .gap_2()
-            .border_1()
-            .border_color(cx.theme().border)
-            .rounded_lg()
-            .bg(cx.theme().background)
-            .p_3()
-            .child(
-                h_flex()
-                    .id("whalenest-log-header")
-                    .items_center()
-                    .justify_between()
-                    .child(Label::new(format!("日志 · {profile}")).text_sm().font_semibold())
-                    .child(
-                        Button::new("whalenest-log-open")
-                            .small()
-                            .outline()
-                            .icon(IconName::File)
-                            .label("打开完整日志文件")
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.open_log(window, cx);
-                            })),
-                    ),
-            )
-            .child(
-                v_flex()
-                    .id("whalenest-log-lines")
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .gap_0p5()
-                    .children(lines.into_iter().map(|l| {
-                        Label::new(format!("  {l}"))
-                            .text_xs()
-                            .font_family("monospace")
-                            .text_color(cx.theme().muted_foreground)
-                    })),
-            )
     }
 
     fn render_guide(&self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1077,14 +1540,6 @@ pub(crate) fn copy_text(text: &str, window: &mut Window, cx: &mut App) {
     }
 }
 
-/// meta 键值行（键 muted，值 foreground）。
-fn card_meta(label: &str, value: &str, cx: &App) -> impl IntoElement {
-    h_flex()
-        .gap_2()
-        .items_center()
-        .child(Label::new(label).text_xs().text_color(cx.theme().muted_foreground))
-        .child(Label::new(value).text_xs().text_color(cx.theme().foreground))
-}
 
 /// 过长路径的省略显示。
 fn shorten_path(s: &str, max: usize) -> String {

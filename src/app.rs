@@ -38,6 +38,12 @@ pub enum AppEvent {
     Update(UpdateEventPayload),
     /// dsh 一键安装成功（guide / wizard 里的「一键安装」）
     DshInstalled,
+    /// 插件管理操作启动（后台执行中），message 为操作描述。
+    PluginOpStarted { profile: String, message: String },
+    /// 插件管理操作完成（成功/失败），携带结果信息。
+    PluginOpResult { profile: String, ok: bool, message: String },
+    /// 可升级插件查询结果：profile + (包名, 最新版本) 列表。
+    PluginOutdated { profile: String, updates: Vec<(String, String)> },
 }
 
 /// 操作请求：tray / 设置对话框 / 向导共同发往应用级监听循环。
@@ -642,16 +648,19 @@ pub fn scan_profiles(managed: &Managed) -> Vec<ProfileInfo> {
                 continue;
             }
             let (bundles, is_web_type) = read_profile_bundles(&path.join("package.json"));
-            let plugin_count = bundles
-                .iter()
+            // User plugins: non-@deepseek-ai/ bundles (the ones the user installed).
+            let plugins: Vec<String> = bundles
+                .into_iter()
                 .filter(|b| !b.starts_with("@deepseek-ai/"))
-                .count();
+                .collect();
+            let plugin_count = plugins.len();
             let cwd = config.profile_cwd(&name);
             let (session_count, last_session_time) = session_stats(&sessions_dir, &cwd);
             out.push(ProfileInfo {
                 name: name.clone(),
                 path,
                 is_web_type,
+                plugins,
                 plugin_count,
                 cwd,
                 session_count,
@@ -683,6 +692,112 @@ fn read_profile_bundles(pkg_path: &Path) -> (Vec<String>, bool) {
         .iter()
         .any(|b| b == "dsh-web-app" || b.ends_with("/dsh-web-app"));
     (bundles, is_web_type)
+}
+
+/// 单个插件条目：名称 / 版本规格 / 是否已启用（在 bundle 层中）。
+#[derive(Clone, Debug)]
+pub struct PluginEntry {
+    pub name: String,
+    pub version: String,
+    pub enabled: bool,
+}
+
+/// 读取一个 profile 目录下所有用户插件（非 `@deepseek-ai/`）的
+/// 名称 / 版本 / 启用态。
+///
+/// - "enabled" = 包名出现在 `dsh.profile.bundles` 中（即进入 profile 层栈）。
+/// - 版本取自 `dependencies[name]`（如 `^0.1.1`）。
+/// - 官方核心（`@deepseek-ai/dsh-base` 等）被过滤，不允许启用/禁用。
+pub fn plugin_entries(profile: &ProfileInfo) -> Vec<PluginEntry> {
+    let pkg_path = profile.path.join("package.json");
+    let Ok(text) = std::fs::read_to_string(&pkg_path) else {
+        return Vec::new();
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+
+    // 已启用的 bundle 集合（用户插件部分）。
+    let enabled: std::collections::HashSet<String> = json
+        .pointer("/dsh/profile/bundles")
+        .and_then(|b| b.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|b| b.as_str().map(String::from))
+                .filter(|b| !b.starts_with("@deepseek-ai/"))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // 已安装的依赖（用户插件部分），用于列出所有可管理插件。
+    let mut entries: Vec<PluginEntry> = json
+        .pointer("/dependencies")
+        .and_then(|d| d.as_object())
+        .map(|deps| {
+            deps.iter()
+                .filter(|(name, _)| !name.starts_with("@deepseek-ai/"))
+                .map(|(name, ver)| PluginEntry {
+                    name: name.clone(),
+                    version: ver.as_str().unwrap_or("").to_string(),
+                    enabled: enabled.contains(name),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    entries
+}
+
+/// 启用 / 禁用某插件：把包名加入或移出 `dsh.profile.bundles`。
+///
+/// - 官方核心（`@deepseek-ai/`）拒绝操作。
+/// - 只改 `dsh.profile.bundles`，不改 `dependencies`（包仍安装着，
+///   禁用只是让它离开 profile 层栈）。
+/// - 若该 profile 正在运行，自动重启内核使变更生效。
+pub fn set_plugin_enabled(
+    managed: &Managed,
+    profile: &str,
+    plugin: &str,
+    enabled: bool,
+) -> Result<(), String> {
+    if plugin.starts_with("@deepseek-ai/") {
+        return Err("官方核心插件不能启用/禁用".into());
+    }
+
+    let profile_dir = state::dsh_home().join("profiles").join(profile);
+    let pkg_path = profile_dir.join("package.json");
+    let text = std::fs::read_to_string(&pkg_path).map_err(|e| e.to_string())?;
+    let mut json: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("解析 package.json 失败: {e}"))?;
+
+    // 取出（或初始化）bundles 数组。
+    let bundles = json
+        .pointer_mut("/dsh/profile/bundles")
+        .and_then(|b| b.as_array_mut())
+        .ok_or("profile 缺少 dsh.profile.bundles 字段")?;
+
+    let present = bundles.iter().any(|b| b.as_str() == Some(plugin));
+    if enabled && !present {
+        bundles.push(serde_json::Value::String(plugin.to_string()));
+    } else if !enabled && present {
+        bundles.retain(|b| b.as_str() != Some(plugin));
+    } else {
+        return Ok(()); // 已是目标状态
+    }
+
+    let out = serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?;
+    std::fs::write(&pkg_path, out).map_err(|e| format!("写回 package.json 失败: {e}"))?;
+
+    // 该 profile 正在运行则重启生效。
+    let running = {
+        let k = managed.kernel.lock();
+        k.config.profile == profile && !matches!(k.state, KernelState::Stopped)
+    };
+    if running {
+        restart_kernel_impl(managed);
+    }
+    Ok(())
 }
 
 /// 该 cwd 对应会话目录的（子目录数，目录 mtime）。
@@ -837,6 +952,44 @@ mod tests {
             bundles.iter().filter(|b| !b.starts_with("@deepseek-ai/")).count(),
             1 // dsh-skin-material-you
         );
+        clean();
+    }
+
+    #[test]
+    fn plugin_entries_lists_deps_with_bundle_enabled_state() {
+        let (dir, clean) = temp_ctx("plugin-entries");
+        let pkg = dir.join("package.json");
+        std::fs::write(
+            &pkg,
+            r#"{
+  "name": "dsh-profile-web",
+  "dependencies": {
+    "dsh-ast-edit-tool": "^0.1.1",
+    "dsh-better-sidebar": "0.18.0"
+  },
+  "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-ast-edit-tool"] } }
+}"#,
+        )
+        .unwrap();
+        let profile = ProfileInfo {
+            name: "web".to_string(),
+            path: dir.clone(),
+            is_web_type: true,
+            plugins: vec!["dsh-ast-edit-tool".to_string()],
+            plugin_count: 1,
+            cwd: PathBuf::from("/tmp"),
+            session_count: 0,
+            last_session_time: None,
+        };
+        let entries = plugin_entries(&profile);
+        // 两个依赖都在，ast-edit 已启用（在 bundles 中），better-sidebar 未启用。
+        assert_eq!(entries.len(), 2);
+        let ast = entries.iter().find(|e| e.name == "dsh-ast-edit-tool").unwrap();
+        assert!(ast.enabled);
+        assert_eq!(ast.version, "^0.1.1");
+        let bb = entries.iter().find(|e| e.name == "dsh-better-sidebar").unwrap();
+        assert!(!bb.enabled);
+        assert_eq!(bb.version, "0.18.0");
         clean();
     }
 

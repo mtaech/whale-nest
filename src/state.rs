@@ -53,6 +53,8 @@ pub struct ProfileInfo {
     pub path: PathBuf,
     /// Whether this profile is a web-type profile (hosts `dsh-web-app`).
     pub is_web_type: bool,
+    /// User plugin names in `dsh.profile.bundles` (non-`@deepseek-ai/`).
+    pub plugins: Vec<String>,
     /// Number of user plugins in `dsh.profile.bundles` (non-`@deepseek-ai/`).
     pub plugin_count: usize,
     /// Working directory bound to this profile (from `profile_cwds`, or default).
