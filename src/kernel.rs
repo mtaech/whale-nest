@@ -314,12 +314,39 @@ fn shell_probe(shell: &Path, flags: &str, cmd: &str) -> Option<String> {
 
 /// PATH as seen by the user's login shell (rc-file contributions included).
 #[cfg(not(windows))]
-fn login_shell_path() -> Option<String> {
+pub fn login_shell_path() -> Option<String> {
     let shell = login_shell()?;
     shell_probe(&shell, "-lic", "printf %s \"$PATH\"")
         .or_else(|| shell_probe(&shell, "-lc", "printf %s \"$PATH\""))
         .or_else(|| shell_probe(&shell, "-c", "printf %s \"$PATH\""))
 }
+
+/// 确保当前进程的 PATH 包含 ~/.local/bin 以及用户的登录 shell PATH（mise/nvm/volta 等）。
+#[cfg(not(windows))]
+pub fn ensure_env_path() {
+    let mut paths: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    if let Some(home) = std::env::var_os("HOME") {
+        let local_bin = PathBuf::from(home).join(".local/bin");
+        if !paths.contains(&local_bin) {
+            paths.push(local_bin);
+        }
+    }
+    if let Some(shell_path) = login_shell_path() {
+        for p in std::env::split_paths(std::ffi::OsStr::new(&shell_path)) {
+            if !paths.contains(&p) {
+                paths.push(p);
+            }
+        }
+    }
+    if let Ok(new_path) = std::env::join_paths(&paths) {
+        std::env::set_var("PATH", new_path);
+    }
+}
+
+#[cfg(windows)]
+pub fn ensure_env_path() {}
 
 /// Kernel state machine.
 #[derive(Clone, Debug)]
@@ -904,10 +931,24 @@ fn extract_dsh_web_url(line: &str) -> Option<String> {
 }
 
 fn read_log_tail(path: &Path, n: usize) -> String {
-    let Ok(data) = fs::read(path) else {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = fs::File::open(path) else {
         return String::new();
     };
-    let text = String::from_utf8_lossy(&data);
+    let Ok(meta) = file.metadata() else {
+        return String::new();
+    };
+    let file_len = meta.len();
+    let max_bytes = ((n * 512).max(64 * 1024) as u64).min(256 * 1024);
+    let offset = file_len.saturating_sub(max_bytes);
+    if offset > 0 {
+        let _ = file.seek(SeekFrom::Start(offset));
+    }
+    let mut buf = Vec::new();
+    if file.read_to_end(&mut buf).is_err() {
+        return String::new();
+    }
+    let text = String::from_utf8_lossy(&buf);
     let lines: Vec<&str> = text.lines().collect();
     let start = lines.len().saturating_sub(n);
     lines[start..].join("\n")
