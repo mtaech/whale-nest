@@ -1117,6 +1117,18 @@ impl Shell {
                                 this.start_profile(name_start.clone());
                             })),
                     )
+                    // 停止内核（仅运行中；不切换 profile）
+                    .when(status == CardStatus::Running, |this| {
+                        this.child(
+                            Button::new(format!("whalenest-hero-stop-{}", profile.name))
+                                .outline()
+                                .icon(IconName::CircleX)
+                                .label("停止")
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, _| {
+                                    app::stop_kernel(&this.managed);
+                                })),
+                        )
+                    })
                     // 删除 profile
                     .child(
                         Button::new(format!("whalenest-hero-del-{}", profile.name))

@@ -174,6 +174,12 @@ mod imp {
                 }
                 .into(),
                 StandardItem {
+                    label: "停止 dsh 内核".into(),
+                    activate: send(Control::Stop),
+                    ..Default::default()
+                }
+                .into(),
+                StandardItem {
                     label: "在浏览器打开".into(),
                     activate: send(Control::OpenBrowser),
                     ..Default::default()
@@ -260,6 +266,10 @@ mod imp {
             Err(_) => return false,
         };
         let restart = match menu_item("restart-kernel", "重启 dsh 内核", true) {
+            Ok(m) => m,
+            Err(_) => return false,
+        };
+        let stop = match menu_item("stop-kernel", "停止 dsh 内核", true) {
             Ok(m) => m,
             Err(_) => return false,
         };
@@ -352,6 +362,7 @@ mod imp {
             &switch_submenu,
             &sep,
             &restart,
+            &stop,
             &open_browser,
             &sep,
             &more_submenu,
@@ -408,6 +419,7 @@ mod imp {
         let ctl = match id {
             "open-main" => Control::OpenMain,
             "restart-kernel" => Control::RestartKernel,
+            "stop-kernel" => Control::Stop,
             "open-browser" => Control::OpenBrowser,
             "copy-diagnostics" => Control::CopyDiagnostics,
             "open-log" => Control::OpenLog,
