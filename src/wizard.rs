@@ -25,7 +25,7 @@ impl Shell {
     /// 渲染向导主区域（单步：环境检测）。
     pub(crate) fn render_wizard(
         &mut self,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let env_items = wizard_env_items(&self.env_check, cx);
@@ -37,11 +37,17 @@ impl Shell {
         let dsh_guide = if !dsh_found {
             v_flex()
                 .id("whalenest-wizard-dsh-guide")
+                .p_4()
+                .rounded_xl()
+                .border_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().popover)
                 .gap_3()
                 .child(
-                    gpui_kit::component::label::Label::new("尚未检测到 dsh，请先安装：")
+                    gpui_kit::component::label::Label::new("尚未检测到 dsh 内核，请先运行安装命令：")
                         .text_sm()
-                        .text_color(cx.theme().muted_foreground),
+                        .font_medium()
+                        .text_color(cx.theme().foreground),
                 )
                 .child(command_box(app::INSTALL_COMMAND, cx))
                 .child(
@@ -49,6 +55,7 @@ impl Shell {
                         .id("whalenest-wizard-dsh-actions")
                         .gap_2()
                         .items_center()
+                        .justify_end()
                         .child(
                             Button::new("whalenest-wizard-copy-cmd")
                                 .small()
@@ -63,23 +70,23 @@ impl Shell {
                                 }),
                         )
                         .child(
-                            Button::new("whalenest-wizard-install-dsh")
-                                .small()
-                                .primary()
-                                .label(if self.wizard_running { "安装中…" } else { "一键安装" })
-                                .disabled(self.wizard_running)
-                                .on_click(cx.listener(|this, _: &ClickEvent, _, _| {
-                                    this.install_dsh();
-                                })),
-                        )
-                        .child(
                             Button::new("whalenest-wizard-recheck")
                                 .small()
                                 .outline()
-                                .icon(IconName::Redo2)
+                                .icon(IconName::RotateCw)
                                 .label("重新检测")
                                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                     this.recheck_env(window, cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("whalenest-wizard-install-dsh")
+                                .small()
+                                .primary()
+                                .label(if self.wizard_running { "正在安装中…" } else { "一键自动安装" })
+                                .disabled(self.wizard_running)
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, _| {
+                                    this.install_dsh();
                                 })),
                         ),
                 )
@@ -97,20 +104,33 @@ impl Shell {
                 v_flex()
                     .id("whalenest-wizard-inner")
                     .w(px(680.))
-                    .gap_6()
+                    .gap_5()
                     .child(
                         v_flex()
                             .id("whalenest-wizard-header")
-                            .gap_1()
+                            .gap_2()
                             .items_center()
+                            .child(
+                                h_flex()
+                                    .size_12()
+                                    .rounded_xl()
+                                    .bg(cx.theme().primary)
+                                    .items_center()
+                                    .justify_center()
+                                    .child(
+                                        Icon::new(IconName::Globe)
+                                            .with_size(px(24.))
+                                            .text_color(cx.theme().primary_foreground),
+                                    ),
+                            )
                             .child(
                                 gpui_kit::component::label::Label::new("欢迎使用 WhaleNest")
                                     .text_2xl()
-                                    .font_semibold(),
+                                    .font_bold(),
                             )
                             .child(
                                 gpui_kit::component::label::Label::new(
-                                    "几步完成环境准备，即可以桌面应用的方式使用 DeepSeek Harness",
+                                    "几步完成运行环境准备，即可以桌面管理器的方式使用 DeepSeek Harness",
                                 )
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground),
@@ -127,8 +147,8 @@ impl Shell {
                             .child(
                                 Button::new("whalenest-wizard-recheck-all")
                                     .outline()
-                                    .icon(IconName::Redo2)
-                                    .label("重新检测")
+                                    .icon(IconName::RotateCw)
+                                    .label("重新检测所有环境")
                                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                         this.recheck_env(window, cx);
                                     })),
@@ -139,7 +159,7 @@ impl Shell {
                                     .label(if self.wizard_running {
                                         "正在启动内核…"
                                     } else {
-                                        "完成设置"
+                                        "完成环境准备，进入工作台"
                                     })
                                     .disabled(self.wizard_running || !dsh_found)
                                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -206,20 +226,32 @@ fn env_item_row(
     required: bool,
     cx: &App,
 ) -> impl IntoElement {
-    let (badge_text, badge_color): (&str, Hsla) = if found {
+    let (badge_text, badge_color, icon, icon_bg): (&str, Hsla, IconName, Hsla) = if found {
         (
             version.map(|v| v.trim_start_matches('v')).unwrap_or("已就绪"),
             cx.theme().success,
+            IconName::CircleCheck,
+            cx.theme().success.opacity(0.12),
         )
     } else if !required {
-        ("未检测到", cx.theme().warning)
+        (
+            "未检测到",
+            cx.theme().warning,
+            IconName::TriangleAlert,
+            cx.theme().warning.opacity(0.15),
+        )
     } else {
-        ("未安装", cx.theme().danger)
+        (
+            "未安装",
+            cx.theme().danger,
+            IconName::CircleX,
+            cx.theme().danger.opacity(0.12),
+        )
     };
     let desc = if found {
         path.unwrap_or("已在环境变量 PATH 中").to_string()
     } else if !required {
-        "可选工具（安装后加速依赖解析）".to_string()
+        "可选工具（安装后可加速依赖解析）".to_string()
     } else {
         "未检测到可执行文件".to_string()
     };
@@ -228,33 +260,55 @@ fn env_item_row(
         .id(format!("whalenest-wizard-env-{label}"))
         .gap_3()
         .px_4()
-        .py_2p5()
-        .rounded_md()
+        .py_3()
+        .rounded_xl()
         .border_1()
         .border_color(cx.theme().border)
         .bg(cx.theme().popover)
         .items_center()
         .justify_between()
         .child(
-            v_flex()
-                .id(format!("whalenest-wizard-env-info-{label}"))
-                .gap_0p5()
+            h_flex()
+                .gap_3()
+                .items_center()
                 .flex_1()
                 .child(
-                    gpui_kit::component::label::Label::new(label.to_string())
-                        .text_sm()
-                        .font_semibold(),
+                    h_flex()
+                        .size_8()
+                        .rounded_md()
+                        .bg(icon_bg)
+                        .items_center()
+                        .justify_center()
+                        .child(Icon::new(icon).small().text_color(badge_color)),
                 )
                 .child(
-                    gpui_kit::component::label::Label::new(desc)
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground),
+                    v_flex()
+                        .id(format!("whalenest-wizard-env-info-{label}"))
+                        .gap_0p5()
+                        .flex_1()
+                        .child(
+                            gpui_kit::component::label::Label::new(label.to_string())
+                                .text_sm()
+                                .font_bold()
+                                .text_color(cx.theme().foreground),
+                        )
+                        .child(
+                            gpui_kit::component::label::Label::new(desc)
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground),
+                        ),
                 ),
         )
         .child(
             h_flex()
                 .id(format!("whalenest-wizard-env-badge-{label}"))
                 .gap_1p5()
+                .px_2p5()
+                .py_1()
+                .rounded_full()
+                .bg(badge_color.opacity(0.12))
+                .border_1()
+                .border_color(badge_color.opacity(0.25))
                 .items_center()
                 .child(
                     div()
@@ -266,6 +320,7 @@ fn env_item_row(
                 .child(
                     gpui_kit::component::label::Label::new(badge_text.to_string())
                         .text_xs()
+                        .font_semibold()
                         .text_color(badge_color),
                 ),
         )

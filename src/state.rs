@@ -43,6 +43,9 @@ pub struct AppState {
     /// Whether user has completed initial onboarding wizard. Default false (triggers wizard on first run).
     #[serde(default)]
     pub initialized: bool,
+    /// Custom font family for UI. None means system default.
+    #[serde(default)]
+    pub font_family: Option<String>,
 }
 
 /// Runtime-scanned profile summary (never persisted).
@@ -95,6 +98,7 @@ impl Default for AppState {
             autostart: false,
             lock_port: false,
             initialized: false,
+            font_family: None,
         }
     }
 }
@@ -351,5 +355,15 @@ mod tests {
         let state = AppState::default();
         let cwd = state.profile_cwd("missing");
         assert!(!cwd.as_os_str().is_empty());
+    }
+
+    #[test]
+    fn font_family_roundtrip_toml() {
+        let mut state = AppState::default();
+        state.font_family = Some("Noto Sans CJK SC".to_string());
+        let text = toml::to_string_pretty(&state).expect("serialize");
+        assert!(text.contains("Noto Sans CJK SC"));
+        let back: AppState = toml::from_str(&text).expect("deserialize");
+        assert_eq!(back.font_family.as_deref(), Some("Noto Sans CJK SC"));
     }
 }

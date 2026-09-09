@@ -12,12 +12,14 @@ mod desktop_entry;
 mod kernel;
 mod lifecycle;
 mod notify;
+mod plugin_install;
 mod plugin_op;
 mod readiness;
 mod settings;
 mod shell;
 mod state;
 mod tray;
+mod theme;
 mod updater;
 mod wizard;
 
@@ -40,11 +42,20 @@ fn main() {
 
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
+        .with_quit_mode(gpui_kit::QuitMode::Explicit)
         .run(move |cx| {
             gpui_kit::init(cx);
+            cx.set_quit_mode(gpui_kit::QuitMode::Explicit);
+            theme::init_theme(None, cx);
+            kernel::ensure_env_path();
 
             let (managed, controls_rx) = app::Managed::new();
             cx.set_global(managed.clone());
+
+            // 若持久化配置中包含自定义字体，启动时即时应用
+            if let Some(font) = managed.config.lock().font_family.as_deref() {
+                theme::set_font_family(Some(font), None, cx);
+            }
 
             // 0. Wayland / XDG 桌面入口（.desktop + 主题图标），供合成器按 app_id
             //    解析窗口 / 任务栏图标；失败静默，不影响主流程。
@@ -60,10 +71,7 @@ fn main() {
             app::spawn_readiness(&managed);
 
             // 3. 托盘（失败静默 → tray_active = false，关闭窗口即退出）
-            let managed_tray = managed.clone();
-            std::thread::spawn(move || {
-                tray::spawn_tray(managed_tray);
-            });
+            tray::spawn_tray(managed.clone());
 
             // 4. 应用级控制监听（tray / 无窗口时重开窗口等）
             let managed2 = managed.clone();
@@ -78,7 +86,7 @@ fn main() {
             let managed3 = managed.clone();
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_secs(5));
-                app::check_update_async(&managed3);
+                app::check_update_async(&managed3, false);
             });
 
             // 6. 主窗口
@@ -166,7 +174,7 @@ fn handle_control(managed: &app::Managed, control: Control, cx: &gpui_kit::Async
         Control::SetAutostart(v) => {
             let _ = lifecycle::set_autostart(managed, v);
         }
-        Control::CheckUpdate => app::check_update_async(managed),
+        Control::CheckUpdate => app::check_update_async(managed, true),
         Control::InstallUpdate => app::install_update_async(managed),
         Control::InstallDsh => app::install_dsh(managed),
         Control::SwitchProfile(name) => app::switch_profile(managed, name),

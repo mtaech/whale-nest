@@ -36,6 +36,10 @@ pub enum AppEvent {
         status: KernelStatus,
     },
     Update(UpdateEventPayload),
+    /// 手动检查更新结果（成功/失败），携带提示信息。
+    UpdateCheckResult { ok: bool, message: String },
+    /// dsh 升级操作结果（成功/失败），携带提示信息。
+    UpdateInstallResult { ok: bool, message: String },
     /// dsh 一键安装成功（guide / wizard 里的「一键安装」）
     DshInstalled,
     /// 插件管理操作启动（后台执行中），message 为操作描述。
@@ -372,8 +376,8 @@ pub fn complete_setup(managed: &Managed) -> Result<(), String> {
 
 // ── 更新与安装（从 lib.rs 移植）───────────────────────────────────────────
 
-/// 后台跑一次更新检查并广播结果（离线 / dsh 缺失时静默）。
-pub fn check_update_async(managed: &Managed) {
+/// 后台跑一次更新检查并广播结果（is_manual 为 true 时在完成或失败时广播反馈给 UI 弹窗/通知）。
+pub fn check_update_async(managed: &Managed, is_manual: bool) {
     let managed = managed.clone();
     std::thread::spawn(move || {
         let result = check_for_update();
@@ -382,10 +386,27 @@ pub fn check_update_async(managed: &Managed) {
                 *managed.update.lock() = Some(info.clone());
                 let _ = managed
                     .events
-                    .send(AppEvent::Update(UpdateEventPayload::from(info)));
+                    .send(AppEvent::Update(UpdateEventPayload::from(info.clone())));
+                if is_manual {
+                    let msg = if info.has_update {
+                        format!("发现 dsh 新版本 v{}（当前运行 v{}）", info.latest, info.current)
+                    } else {
+                        format!("当前 dsh 已是最新版本 (v{})", info.current)
+                    };
+                    let _ = managed.events.send(AppEvent::UpdateCheckResult {
+                        ok: true,
+                        message: msg,
+                    });
+                }
             }
             None => {
                 *managed.update.lock() = None;
+                if is_manual {
+                    let _ = managed.events.send(AppEvent::UpdateCheckResult {
+                        ok: false,
+                        message: "检查更新失败：未能获取 dsh 版本或网络不可用".into(),
+                    });
+                }
             }
         }
         // 托盘「发现新版本」项随结果刷新
@@ -393,27 +414,46 @@ pub fn check_update_async(managed: &Managed) {
     });
 }
 
-/// 后台 `npm i -g @deepseek-ai/dsh`；完成后重新检查。
+/// 后台 `npm i -g @deepseek-ai/dsh`；完成后自动广播结果并重启内核。
 pub fn install_update_async(managed: &Managed) {
     let managed = managed.clone();
     std::thread::spawn(move || {
-        let _ = install_update_inner();
-        check_update_async(&managed);
+        let res = install_update_inner();
+        match res {
+            Ok(()) => {
+                let _ = managed.events.send(AppEvent::UpdateInstallResult {
+                    ok: true,
+                    message: "dsh 升级成功！正在自动重启内核…".into(),
+                });
+                std::thread::sleep(Duration::from_millis(600));
+                restart_kernel_impl(&managed);
+                check_update_async(&managed, false);
+            }
+            Err(e) => {
+                let _ = managed.events.send(AppEvent::UpdateInstallResult {
+                    ok: false,
+                    message: format!("dsh 升级失败: {e}"),
+                });
+            }
+        }
     });
 }
 
 fn install_update_inner() -> Result<(), String> {
-    use std::process::{Command, Stdio};
-    let status = Command::new("npm")
+    use std::process::Command;
+    let output = Command::new("npm")
         .args(["install", "-g", "@deepseek-ai/dsh"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|e| format!("执行 npm 安装失败: {e}"))?;
-    if status.success() {
+        .output()
+        .map_err(|e| format!("执行 npm 升级命令失败: {e}"))?;
+    if output.status.success() {
         Ok(())
     } else {
-        Err(format!("npm 安装失败，退出码 {:?}", status.code()))
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let first_err = stderr
+            .lines()
+            .find(|l| l.contains("ERR!") || !l.trim().is_empty())
+            .unwrap_or("npm 进程退出异常");
+        Err(first_err.to_string())
     }
 }
 
@@ -653,20 +693,115 @@ fn read_profile_bundles(pkg_path: &Path) -> (Vec<String>, bool) {
     (bundles, is_web_type)
 }
 
-/// 单个插件条目：名称 / 版本规格 / 是否已启用（在 bundle 层中）。
+/// 插件来源类型（npm 镜像、GitHub/git、本地 link/workspace、未知）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PluginSource {
+    Npm,
+    Git,
+    Local,
+    Unknown,
+}
+
+impl PluginSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PluginSource::Npm => "npm",
+            PluginSource::Git => "git",
+            PluginSource::Local => "local",
+            PluginSource::Unknown => "unknown",
+        }
+    }
+}
+
+/// 单个插件条目：名称 / 声明规格 / 实际已装版本 / 描述 / 来源 / 仓库外链 / 启用状态。
 #[derive(Clone, Debug)]
 pub struct PluginEntry {
     pub name: String,
     pub version: String,
+    pub specifier: String,
+    pub installed_version: Option<String>,
+    pub description: Option<String>,
+    pub source: PluginSource,
+    pub url: Option<String>,
     pub enabled: bool,
 }
 
+/// 判断是否为核心不可动插件（@deepseek-ai/* 或 @deepseek-harness-tui/*）。
+pub fn is_core_plugin(name: &str) -> bool {
+    name.starts_with("@deepseek-ai/") || name.starts_with("@deepseek-harness-tui/")
+}
+
+fn determine_plugin_source(specifier: &str) -> PluginSource {
+    let s = specifier.trim();
+    if s.is_empty() {
+        PluginSource::Unknown
+    } else if s.starts_with("github:") || s.starts_with("git+") || s.starts_with("git:") {
+        PluginSource::Git
+    } else if s.starts_with("file:") || s.starts_with("link:") || s.starts_with("workspace:") {
+        PluginSource::Local
+    } else {
+        PluginSource::Npm
+    }
+}
+
+fn parse_plugin_repo_url(
+    name: &str,
+    specifier: &str,
+    source: PluginSource,
+    nm_json: Option<&serde_json::Value>,
+) -> Option<String> {
+    // 1. 若 node_modules/<name>/package.json 提供了 repository 或 homepage，优先采用
+    if let Some(json) = nm_json {
+        if let Some(repo) = json.get("repository") {
+            let repo_str = if let Some(s) = repo.as_str() {
+                Some(s.to_string())
+            } else if let Some(obj) = repo.as_object() {
+                obj.get("url").and_then(|u| u.as_str()).map(String::from)
+            } else {
+                None
+            };
+            if let Some(mut raw) = repo_str {
+                if let Some(stripped) = raw.strip_prefix("git+") {
+                    raw = stripped.to_string();
+                }
+                if let Some(stripped) = raw.strip_prefix("ssh://git@github.com/") {
+                    raw = format!("https://github.com/{stripped}");
+                }
+                if let Some(stripped) = raw.strip_suffix(".git") {
+                    raw = stripped.to_string();
+                }
+                if raw.starts_with("http://") || raw.starts_with("https://") {
+                    return Some(raw);
+                }
+            }
+        }
+        if let Some(hp) = json.get("homepage").and_then(|h| h.as_str()) {
+            if hp.starts_with("http://") || hp.starts_with("https://") {
+                return Some(hp.to_string());
+            }
+        }
+    }
+
+    // 2. 根据 specifier 和 source 兜底推导
+    match source {
+        PluginSource::Git => {
+            if let Some(rest) = specifier.strip_prefix("github:") {
+                let user_repo = rest.split('#').next().unwrap_or(rest);
+                Some(format!("https://github.com/{}", user_repo.trim_matches('/')))
+            } else if let Some(rest) = specifier.strip_prefix("git+https://github.com/") {
+                let user_repo = rest.split('#').next().unwrap_or(rest).trim_end_matches(".git");
+                Some(format!("https://github.com/{}", user_repo.trim_matches('/')))
+            } else {
+                None
+            }
+        }
+        PluginSource::Npm => Some(format!("https://www.npmjs.com/package/{}", name)),
+        _ => None,
+    }
+}
+
 /// 读取一个 profile 目录下所有用户插件（非 `@deepseek-ai/`）的
-/// 名称 / 版本 / 启用态。
-///
-/// - "enabled" = 包名出现在 `dsh.profile.bundles` 中（即进入 profile 层栈）。
-/// - 版本取自 `dependencies[name]`（如 `^0.1.1`）。
-/// - 官方核心（`@deepseek-ai/dsh-base` 等）被过滤，不允许启用/禁用。
+/// 完整元数据清单（名称 / 版本 / 描述 / 来源 / 仓库链接 / 启用态）。
 pub fn plugin_entries(profile: &ProfileInfo) -> Vec<PluginEntry> {
     let pkg_path = profile.path.join("package.json");
     let Ok(text) = std::fs::read_to_string(&pkg_path) else {
@@ -683,54 +818,114 @@ pub fn plugin_entries(profile: &ProfileInfo) -> Vec<PluginEntry> {
         .map(|arr| {
             arr.iter()
                 .filter_map(|b| b.as_str().map(String::from))
-                .filter(|b| !b.starts_with("@deepseek-ai/"))
+                .filter(|b| !is_core_plugin(b))
                 .collect()
         })
         .unwrap_or_default();
 
-    // 已安装的依赖（用户插件部分），用于列出所有可管理插件。
-    let mut entries: Vec<PluginEntry> = json
+    let deps_obj = json
         .pointer("/dependencies")
-        .and_then(|d| d.as_object())
-        .map(|deps| {
-            deps.iter()
-                .filter(|(name, _)| !name.starts_with("@deepseek-ai/"))
-                .map(|(name, ver)| PluginEntry {
-                    name: name.clone(),
-                    version: ver.as_str().unwrap_or("").to_string(),
-                    enabled: enabled.contains(name),
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+        .and_then(|d| d.as_object());
+
+    // 收集所有用户插件名称（dependencies 键 + bundles 条目，去重）
+    let mut names = std::collections::BTreeSet::new();
+    if let Some(deps) = deps_obj {
+        for (k, _) in deps {
+            if !is_core_plugin(k) {
+                names.insert(k.clone());
+            }
+        }
+    }
+    for b in &enabled {
+        names.insert(b.clone());
+    }
+
+    let mut entries = Vec::new();
+    for name in names {
+        let specifier = deps_obj
+            .and_then(|d| d.get(&name))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let source = determine_plugin_source(&specifier);
+
+        // 尝试从 profile/node_modules/<name>/package.json 读取实际安装元数据
+        let mut nm_pkg = profile.path.join("node_modules");
+        for seg in name.split('/') {
+            nm_pkg = nm_pkg.join(seg);
+        }
+        nm_pkg = nm_pkg.join("package.json");
+
+        let nm_json: Option<serde_json::Value> = std::fs::read_to_string(&nm_pkg)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok());
+
+        let installed_version = nm_json
+            .as_ref()
+            .and_then(|j| j.get("version"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        let description = nm_json
+            .as_ref()
+            .and_then(|j| j.get("description"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        let url = parse_plugin_repo_url(&name, &specifier, source, nm_json.as_ref());
+
+        let version = if !specifier.is_empty() {
+            specifier.clone()
+        } else {
+            installed_version.clone().unwrap_or_default()
+        };
+
+        entries.push(PluginEntry {
+            name: name.clone(),
+            version,
+            specifier,
+            installed_version,
+            description,
+            source,
+            url,
+            enabled: enabled.contains(&name),
+        });
+    }
 
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     entries
 }
 
-/// 启用 / 禁用某插件：把包名加入或移出 `dsh.profile.bundles`。
+/// 在指定 profile 目录下启用 / 禁用某插件：把包名加入或移出 `dsh.profile.bundles`。
 ///
 /// - 官方核心（`@deepseek-ai/`）拒绝操作。
-/// - 只改 `dsh.profile.bundles`，不改 `dependencies`（包仍安装着，
-///   禁用只是让它离开 profile 层栈）。
-/// - 若该 profile 正在运行，自动重启内核使变更生效。
-pub fn set_plugin_enabled(
-    managed: &Managed,
-    profile: &str,
+/// - 只改 `dsh.profile.bundles`，不改 `dependencies`（包仍安装着，禁用只是让它离开 profile 层栈）。
+pub fn set_plugin_enabled_at_path(
+    profile_dir: &Path,
     plugin: &str,
     enabled: bool,
 ) -> Result<(), String> {
-    if plugin.starts_with("@deepseek-ai/") {
+    if is_core_plugin(plugin) {
         return Err("官方核心插件不能启用/禁用".into());
     }
 
-    let profile_dir = state::dsh_home().join("profiles").join(profile);
     let pkg_path = profile_dir.join("package.json");
     let text = std::fs::read_to_string(&pkg_path).map_err(|e| e.to_string())?;
     let mut json: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("解析 package.json 失败: {e}"))?;
 
-    // 取出（或初始化）bundles 数组。
+    // 初始化/获取 bundles 数组
+    if json.pointer("/dsh/profile/bundles").is_none() {
+        if json.pointer("/dsh/profile").is_none() {
+            if json.pointer("/dsh").is_none() {
+                json["dsh"] = serde_json::json!({});
+            }
+            json["dsh"]["profile"] = serde_json::json!({});
+        }
+        json["dsh"]["profile"]["bundles"] = serde_json::json!([]);
+    }
+
     let bundles = json
         .pointer_mut("/dsh/profile/bundles")
         .and_then(|b| b.as_array_mut())
@@ -747,6 +942,36 @@ pub fn set_plugin_enabled(
 
     let out = serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?;
     std::fs::write(&pkg_path, out).map_err(|e| format!("写回 package.json 失败: {e}"))?;
+    Ok(())
+}
+
+/// 启用 / 禁用某插件：把包名加入或移出 `dsh.profile.bundles`。
+///
+/// - 官方核心（`@deepseek-ai/`）拒绝操作。
+/// - 只改 `dsh.profile.bundles`，不改 `dependencies`（包仍安装着，
+///   禁用只是让它离开 profile 层栈）。
+/// - 若该 profile 正在运行，自动重启内核使变更生效。
+pub fn set_plugin_enabled(
+    managed: &Managed,
+    profile: &str,
+    plugin: &str,
+    enabled: bool,
+) -> Result<(), String> {
+    let profile_dir = {
+        let home = state::dsh_home().join("profiles").join(profile);
+        if home.exists() {
+            home
+        } else {
+            let profiles = scan_profiles(managed);
+            profiles
+                .iter()
+                .find(|p| p.name == profile)
+                .map(|p| p.path.clone())
+                .unwrap_or(home)
+        }
+    };
+
+    set_plugin_enabled_at_path(&profile_dir, plugin, enabled)?;
 
     // 该 profile 正在运行则重启生效。
     let running = {
@@ -757,6 +982,105 @@ pub fn set_plugin_enabled(
         restart_kernel_impl(managed);
     }
     Ok(())
+}
+
+/// 批量启用或禁用某 profile 目录下的所有用户插件。
+pub fn set_all_plugins_enabled_at_path(
+    profile_dir: &Path,
+    enabled: bool,
+) -> Result<usize, String> {
+    let pkg_path = profile_dir.join("package.json");
+    let text = std::fs::read_to_string(&pkg_path).map_err(|e| e.to_string())?;
+    let mut json: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("解析 package.json 失败: {e}"))?;
+
+    let user_deps: Vec<String> = json
+        .pointer("/dependencies")
+        .and_then(|d| d.as_object())
+        .map(|deps| {
+            deps.keys()
+                .filter(|k| !k.starts_with("@deepseek-ai/"))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if json.pointer("/dsh/profile/bundles").is_none() {
+        if json.pointer("/dsh/profile").is_none() {
+            if json.pointer("/dsh").is_none() {
+                json["dsh"] = serde_json::json!({});
+            }
+            json["dsh"]["profile"] = serde_json::json!({});
+        }
+        json["dsh"]["profile"]["bundles"] = serde_json::json!([]);
+    }
+
+    let bundles = json
+        .pointer_mut("/dsh/profile/bundles")
+        .and_then(|b| b.as_array_mut())
+        .ok_or("profile 缺少 dsh.profile.bundles 字段")?;
+
+    let mut changed = 0;
+    if enabled {
+        for dep in &user_deps {
+            if !bundles.iter().any(|b| b.as_str() == Some(dep)) {
+                bundles.push(serde_json::Value::String(dep.clone()));
+                changed += 1;
+            }
+        }
+    } else {
+        let orig_len = bundles.len();
+        bundles.retain(|b| {
+            if let Some(s) = b.as_str() {
+                s.starts_with("@deepseek-ai/")
+            } else {
+                true
+            }
+        });
+        changed = orig_len.saturating_sub(bundles.len());
+    }
+
+    if changed > 0 {
+        let out = serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?;
+        std::fs::write(&pkg_path, out).map_err(|e| format!("写回 package.json 失败: {e}"))?;
+    }
+
+    Ok(changed)
+}
+
+/// 批量启用或禁用某 profile 下的所有用户插件。
+///
+/// - 若该 profile 正在运行且有变动，自动重启内核使变更生效。
+pub fn set_all_plugins_enabled(
+    managed: &Managed,
+    profile: &str,
+    enabled: bool,
+) -> Result<usize, String> {
+    let profile_dir = {
+        let home = state::dsh_home().join("profiles").join(profile);
+        if home.exists() {
+            home
+        } else {
+            let profiles = scan_profiles(managed);
+            profiles
+                .iter()
+                .find(|p| p.name == profile)
+                .map(|p| p.path.clone())
+                .unwrap_or(home)
+        }
+    };
+
+    let changed = set_all_plugins_enabled_at_path(&profile_dir, enabled)?;
+    if changed > 0 {
+        let running = {
+            let k = managed.kernel.lock();
+            k.config.profile == profile && !matches!(k.state, KernelState::Stopped)
+        };
+        if running {
+            restart_kernel_impl(managed);
+        }
+    }
+    Ok(changed)
 }
 
 /// 该 cwd 对应会话目录的（子目录数，目录 mtime）。
@@ -876,6 +1200,7 @@ pub fn create_profile(managed: &Managed, name: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     /// 建一个隔离的临时目录（绝不碰 `~/.dsh`），并带清理钩子。
     fn temp_ctx(name: &str) -> (PathBuf, impl FnOnce()) {
@@ -953,6 +1278,65 @@ mod tests {
     }
 
     #[test]
+    fn plugin_entries_reads_node_modules_metadata_and_urls() {
+        let (dir, clean) = temp_ctx("plugin-metadata");
+        let pkg = dir.join("package.json");
+        std::fs::write(
+            &pkg,
+            r#"{
+  "dependencies": {
+    "dsh-ast-edit-tool": "^0.1.1",
+    "dsh-git-tool": "github:example/dsh-git-tool#v1.0.0"
+  },
+  "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-ast-edit-tool"] } }
+}"#,
+        )
+        .unwrap();
+
+        let nm_dir = dir.join("node_modules").join("dsh-ast-edit-tool");
+        std::fs::create_dir_all(&nm_dir).unwrap();
+        std::fs::write(
+            nm_dir.join("package.json"),
+            r#"{
+  "name": "dsh-ast-edit-tool",
+  "version": "0.1.1",
+  "description": "DSH structural code-edit tool",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mtaech/melon.git"
+  }
+}"#,
+        )
+        .unwrap();
+
+        let profile = ProfileInfo {
+            name: "web".to_string(),
+            path: dir.clone(),
+            is_web_type: true,
+            plugins: vec!["dsh-ast-edit-tool".to_string()],
+            plugin_count: 1,
+            cwd: PathBuf::from("/tmp"),
+            session_count: 0,
+            last_session_time: None,
+        };
+
+        let entries = plugin_entries(&profile);
+        assert_eq!(entries.len(), 2);
+
+        let ast = entries.iter().find(|e| e.name == "dsh-ast-edit-tool").unwrap();
+        assert_eq!(ast.installed_version.as_deref(), Some("0.1.1"));
+        assert_eq!(ast.description.as_deref(), Some("DSH structural code-edit tool"));
+        assert_eq!(ast.source, PluginSource::Npm);
+        assert_eq!(ast.url.as_deref(), Some("https://github.com/mtaech/melon"));
+
+        let git = entries.iter().find(|e| e.name == "dsh-git-tool").unwrap();
+        assert_eq!(git.source, PluginSource::Git);
+        assert_eq!(git.url.as_deref(), Some("https://github.com/example/dsh-git-tool"));
+
+        clean();
+    }
+
+    #[test]
     fn non_web_profile_is_not_web_type() {
         let (dir, clean) = temp_ctx("bundles-tui");
         let pkg = dir.join("package.json");
@@ -991,6 +1375,83 @@ mod tests {
         let (count, last) = session_stats(&dir, Path::new("/no/such/cwd"));
         assert_eq!(count, 0);
         assert!(last.is_none());
+        clean();
+    }
+
+    #[test]
+    fn sets_plugin_enabled_and_disabled_at_path() {
+        let (dir, clean) = temp_ctx("plugin-enable-disable");
+        let pkg = dir.join("package.json");
+        std::fs::write(
+            &pkg,
+            r#"{
+  "name": "dsh-profile-web",
+  "dependencies": {
+    "dsh-plugin-foo": "1.0.0"
+  },
+  "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base"] } }
+}"#,
+        )
+        .unwrap();
+
+        // 启用
+        set_plugin_enabled_at_path(&dir, "dsh-plugin-foo", true).unwrap();
+        let text = std::fs::read_to_string(&pkg).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let bundles = json.pointer("/dsh/profile/bundles").unwrap().as_array().unwrap();
+        assert!(bundles.iter().any(|b| b.as_str() == Some("dsh-plugin-foo")));
+
+        // 禁用
+        set_plugin_enabled_at_path(&dir, "dsh-plugin-foo", false).unwrap();
+        let text = std::fs::read_to_string(&pkg).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let bundles = json.pointer("/dsh/profile/bundles").unwrap().as_array().unwrap();
+        assert!(!bundles.iter().any(|b| b.as_str() == Some("dsh-plugin-foo")));
+        // 核心不能被移出
+        assert!(bundles.iter().any(|b| b.as_str() == Some("@deepseek-ai/dsh-base")));
+
+        // 核心插件不可被操作
+        assert!(set_plugin_enabled_at_path(&dir, "@deepseek-ai/dsh-base", false).is_err());
+        clean();
+    }
+
+    #[test]
+    fn sets_all_plugins_enabled_and_disabled_at_path() {
+        let (dir, clean) = temp_ctx("plugin-batch");
+        let pkg = dir.join("package.json");
+        std::fs::write(
+            &pkg,
+            r#"{
+  "name": "dsh-profile-web",
+  "dependencies": {
+    "dsh-plugin-1": "1.0.0",
+    "dsh-plugin-2": "1.0.0",
+    "@deepseek-ai/dsh-base": "1.0.0"
+  },
+  "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "dsh-plugin-1"] } }
+}"#,
+        )
+        .unwrap();
+
+        // 一键全部禁用
+        let changed = set_all_plugins_enabled_at_path(&dir, false).unwrap();
+        assert_eq!(changed, 1);
+        let text = std::fs::read_to_string(&pkg).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let bundles = json.pointer("/dsh/profile/bundles").unwrap().as_array().unwrap();
+        assert_eq!(bundles.len(), 1);
+        assert_eq!(bundles[0].as_str(), Some("@deepseek-ai/dsh-base"));
+
+        // 一键全部启用
+        let changed = set_all_plugins_enabled_at_path(&dir, true).unwrap();
+        assert_eq!(changed, 2);
+        let text = std::fs::read_to_string(&pkg).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let bundles = json.pointer("/dsh/profile/bundles").unwrap().as_array().unwrap();
+        assert_eq!(bundles.len(), 3);
+        assert!(bundles.iter().any(|b| b.as_str() == Some("dsh-plugin-1")));
+        assert!(bundles.iter().any(|b| b.as_str() == Some("dsh-plugin-2")));
+        assert!(bundles.iter().any(|b| b.as_str() == Some("@deepseek-ai/dsh-base")));
         clean();
     }
 }
